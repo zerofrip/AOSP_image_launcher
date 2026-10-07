@@ -208,7 +208,7 @@ def _plan_for_backend(
         )
         errors = [
             "Cuttlefish is unsupported by the Android Emulator and qemu-system-x86_64 backends",
-            "use launch_cvd from the Cuttlefish host package",
+            *_cuttlefish_launch_cvd_guidance(capabilities),
         ]
         return CommandSpec(
             argv=[],
@@ -232,6 +232,31 @@ def _plan_for_backend(
         product, options, capabilities, accel=accel, help_text=help_text, port_in_use=port_in_use
     )
     return qemu_spec
+
+
+def _cuttlefish_launch_cvd_guidance(capabilities: Capabilities) -> list[str]:
+    """Actionable next step for Cuttlefish: point at the actually-detected
+    launch_cvd/cvd on this host (and whether KVM is usable) instead of a
+    generic "go install something" message."""
+    launch_cvd = capabilities.launch_cvd
+    if launch_cvd.available and launch_cvd.path is not None:
+        if capabilities.host.kvm_accessible:
+            return [
+                f"found {launch_cvd.path} — run it directly with this PRODUCT_OUT's "
+                "images (boot.img/super.img/vendor_boot.img/userdata.img); "
+                "use launch_cvd from the Cuttlefish host package"
+            ]
+        return [
+            f"found {launch_cvd.path}, but /dev/kvm is missing or not accessible "
+            "to this user — launch_cvd needs KVM; fix with: "
+            "sudo usermod -aG kvm,cvdnetwork,render \"$USER\" && sudo reboot, "
+            "then use launch_cvd from the Cuttlefish host package"
+        ]
+    return [
+        "launch_cvd not found on PATH — install the Cuttlefish host packages "
+        "(https://github.com/google/android-cuttlefish: cuttlefish-base + cuttlefish-user), "
+        "then use launch_cvd from the Cuttlefish host package"
+    ]
 
 
 def _preferred_backend_name(product: ProductArtifacts) -> str:

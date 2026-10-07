@@ -31,6 +31,41 @@ def _qemu_format(path: Path) -> str:
     return "qcow2" if str(path).endswith(".qcow2") else "raw"
 
 
+_STANDARD_FIRMWARE_DIRS = (
+    Path("/usr/share/qemu"),
+    Path("/usr/local/share/qemu"),
+)
+
+
+def _detect_firmware_dir(qemu_path: Path | None) -> Path | None:
+    """Find a QEMU firmware/ROM directory (bios-256k.bin, linuxboot_dma.bin)
+    for locally-built, not-``ninja install``-ed qemu-system-x86_64 binaries.
+
+    A freshly built-from-source qemu that was never installed cannot find its
+    BIOS/option-ROM blobs at its compiled-in default datadir, so direct
+    kernel boot (``-kernel``) silently falls through to an unbootable BIOS
+    with zero diagnostic output. If a standard system install already has
+    the firmware, trust the binary's own compiled-in default (return None,
+    no ``-L`` override needed); otherwise look for the build tree's own
+    bundled firmware next to the binary and point ``-L`` at it.
+    """
+    if qemu_path is None:
+        return None
+    for standard in _STANDARD_FIRMWARE_DIRS:
+        if (standard / "bios-256k.bin").is_file():
+            return None
+    candidates = [
+        qemu_path.parent / "qemu-bundle" / "usr" / "local" / "share" / "qemu",
+        qemu_path.parent / "pc-bios",
+        qemu_path.parent.parent / "share" / "qemu",
+        qemu_path.parent / "share" / "qemu",
+    ]
+    for candidate in candidates:
+        if (candidate / "bios-256k.bin").is_file():
+            return candidate
+    return None
+
+
 def _probe_netdev_backends(qemu_path: Path | None) -> frozenset[str]:
     """Return the netdev backend names this qemu-system-x86_64 was built with.
 
@@ -223,6 +258,15 @@ class QemuBackend(Backend):
         # build argv
         exe = str(capabilities.qemu.path)
         argv = [exe]
+
+        firmware_dir = _detect_firmware_dir(capabilities.qemu.path)
+        if firmware_dir is not None:
+            argv += ["-L", str(firmware_dir)]
+            warnings.append(
+                f"using bundled firmware at {firmware_dir} "
+                "(qemu-system-x86_64 appears to be built but not installed; "
+                "run 'ninja install' in its build directory to avoid this)"
+            )
 
         # accel
         argv += ["-accel", accel.selected]

@@ -20,6 +20,46 @@ Python 3.11+, standard library only. Commands are built as argv lists (`shell=Tr
 
 **Generic x86_64 builds** (`product.family = "unknown"` — no `ro.hardware=ranchu/goldfish`, no Cuttlefish evidence): `qemu-system-x86_64` is now supported when `qemu-system-x86_64` is on PATH, architecture is `x86_64`, a kernel + ramdisk (or `boot.img` with `unpack_bootimg`) and `system.img` are available, and neither `vendor_boot` nor `super.img`/dynamic partitions are present. `vendor_boot` and `super.img` are still never attached as a regular disk on any family. The `emulator_ranchu` and `cuttlefish` families remain explicitly unsupported by this backend.
 
+### Friendlier QEMU boot flow
+
+Real-world verification (building `qemu-system-x86_64` from source and booting
+real AOSP x86_64 images) surfaced two rough edges that are now handled
+automatically instead of requiring manual flags:
+
+- **Firmware path for a built-but-not-`ninja install`-ed qemu.** A locally
+  built `qemu-system-x86_64` that was never installed cannot find its
+  `bios-256k.bin` / `linuxboot_dma.bin` at its compiled-in default datadir,
+  so `-kernel` silently falls through to an unbootable BIOS with no error.
+  The launcher now checks the standard system firmware directories first and,
+  if the firmware isn't there, looks next to the resolved `qemu-system-x86_64`
+  binary (`<builddir>/qemu-bundle/usr/local/share/qemu`, `<builddir>/pc-bios`,
+  `../share/qemu`) and adds `-L <dir>` automatically, with a warning
+  suggesting `ninja install` for a permanent fix. `ninja install` itself needs
+  root (`/usr/local/...`); this auto-detection is the no-sudo-required path.
+- **Network backend availability.** `-netdev user` (slirp) requires libslirp,
+  which some qemu builds lack; it used to be hardcoded and failed at runtime
+  with `network backend 'user' is not compiled into this binary`. The
+  launcher now probes `qemu-system-x86_64 -netdev help` and prefers
+  `user` → `passt` (only if the external `passt(1)` helper binary is also
+  actually on `PATH` — `-netdev help` lists the backend *type* regardless of
+  whether the helper is installed) → no networking (`-nic none`), with a
+  warning explaining the degraded ADB reachability. Boot is never blocked by
+  a missing network backend.
+
+### Friendlier Cuttlefish guidance
+
+The launcher now detects `launch_cvd`/`cvd` on `PATH` and reports concrete,
+host-specific next steps instead of a generic "go install something" message:
+- found + `/dev/kvm` accessible → points at the exact `launch_cvd` path to run.
+- found but `/dev/kvm` not accessible → gives the exact fix (`sudo usermod -aG
+  kvm,cvdnetwork,render "$USER" && sudo reboot`).
+- not found → points at the [android-cuttlefish](https://github.com/google/android-cuttlefish)
+  host packages to install.
+
+Cuttlefish itself remains unsupported by the Android Emulator and
+`qemu-system-x86_64` backends in this launcher — these are diagnostics only,
+not a new execution path.
+
 `bootable=True` is reported only after compatibility checks pass.
 
 ## PRODUCT_OUT resolution

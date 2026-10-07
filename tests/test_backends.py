@@ -61,7 +61,13 @@ def _missing_tool(name: str) -> ToolInfo:
     return ToolInfo(name=name, path=None, available=False, error=f"{name} not found")
 
 
-def _caps(*, emulator: Path | None, qemu: Path | None = None) -> Capabilities:
+def _caps(
+    *,
+    emulator: Path | None,
+    qemu: Path | None = None,
+    launch_cvd: Path | None = None,
+    kvm_accessible: bool = True,
+) -> Capabilities:
     emu = (
         ToolInfo(name="emulator", path=emulator, available=emulator is not None, details="mock")
         if emulator is not None
@@ -72,8 +78,14 @@ def _caps(*, emulator: Path | None, qemu: Path | None = None) -> Capabilities:
         if qemu is not None
         else _missing_tool("qemu-system-x86_64")
     )
+    launch_cvd_tool = (
+        ToolInfo(name="launch_cvd", path=launch_cvd, available=True, details="mock")
+        if launch_cvd is not None
+        else _missing_tool("launch_cvd")
+    )
+    host = _host_linux() if kvm_accessible else dataclasses.replace(_host_linux(), kvm_accessible=False)
     return Capabilities(
-        host=_host_linux(),
+        host=host,
         emulator=emu,
         qemu=qemu_tool,
         emulator_check=_missing_tool("emulator-check"),
@@ -81,6 +93,7 @@ def _caps(*, emulator: Path | None, qemu: Path | None = None) -> Capabilities:
         lpunpack=_missing_tool("lpunpack"),
         simg2img=_missing_tool("simg2img"),
         avbtool=_missing_tool("avbtool"),
+        launch_cvd=launch_cvd_tool,
     )
 
 
@@ -467,6 +480,47 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertIn("passt", spec.argv[spec.argv.index("-netdev") + 1])
             self.assertTrue(any("passt" in w for w in spec.warnings))
 
+    def test_firmware_dir_added_for_uninstalled_build(self) -> None:
+        """A built-but-not-installed qemu (no ROMs at its compiled-in datadir)
+        gets -L pointed at its own build-tree bundled firmware."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            build_dir = Path(raw) / "build"
+            build_dir.mkdir()
+            qemu_bin = build_dir / "qemu-system-x86_64"
+            qemu_bin.write_text("#!/bin/sh\nexit 0\n")
+            qemu_bin.chmod(0o755)
+            bundle = build_dir / "qemu-bundle" / "usr" / "local" / "share" / "qemu"
+            bundle.mkdir(parents=True)
+            (bundle / "bios-256k.bin").write_bytes(b"\x00")
+            with unittest.mock.patch(
+                "backends.qemu._STANDARD_FIRMWARE_DIRS", (Path(raw) / "no-such-standard-dir",)
+            ):
+                spec = QemuBackend().plan(
+                    product, LaunchOptions(backend="qemu"),
+                    _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+                )
+            self.assertTrue(spec.bootable)
+            self.assertIn("-L", spec.argv)
+            self.assertEqual(spec.argv[spec.argv.index("-L") + 1], str(bundle))
+            self.assertTrue(any("ninja install" in w for w in spec.warnings))
+
+    def test_firmware_dir_not_added_when_standard_install_has_it(self) -> None:
+        """A properly 'ninja install'-ed / packaged qemu needs no -L override."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            standard = Path(raw) / "standard"
+            standard.mkdir()
+            (standard / "bios-256k.bin").write_bytes(b"\x00")
+            with unittest.mock.patch("backends.qemu._STANDARD_FIRMWARE_DIRS", (standard,)):
+                spec = QemuBackend().plan(
+                    product, LaunchOptions(backend="qemu"),
+                    _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+                )
+            self.assertTrue(spec.bootable)
+            self.assertNotIn("-L", spec.argv)
+
 
 class AutoBackendTests(unittest.TestCase):
     def test_auto_ranchu_uses_emulator(self) -> None:
@@ -499,6 +553,60 @@ class AutoBackendTests(unittest.TestCase):
             self.assertFalse(plan.spec.bootable)
             self.assertEqual(plan.spec.argv, [])
             self.assertTrue(any("launch_cvd" in err for err in plan.spec.errors))
+
+    def test_auto_cuttlefish_guidance_points_at_detected_launch_cvd(self) -> None:
+        """When launch_cvd is actually found on this host and KVM works, say so."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_cuttlefish_product(Path(raw)))
+            cvd_path = Path(raw) / "launch_cvd"
+            plan = build_launch_plan(
+                product,
+                LaunchOptions(backend="auto", accel="tcg"),
+                _caps(emulator=None, launch_cvd=cvd_path, kvm_accessible=True),
+                accel=_tcg(),
+                emulator_help=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertFalse(plan.spec.bootable)
+            self.assertEqual(plan.spec.argv, [])
+            joined = " ".join(plan.spec.errors)
+            self.assertIn("launch_cvd", joined)
+            self.assertIn(str(cvd_path), joined)
+
+    def test_auto_cuttlefish_guidance_flags_missing_kvm(self) -> None:
+        """launch_cvd is found but KVM isn't accessible — say how to fix it."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_cuttlefish_product(Path(raw)))
+            cvd_path = Path(raw) / "launch_cvd"
+            plan = build_launch_plan(
+                product,
+                LaunchOptions(backend="auto", accel="tcg"),
+                _caps(emulator=None, launch_cvd=cvd_path, kvm_accessible=False),
+                accel=_tcg(),
+                emulator_help=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertFalse(plan.spec.bootable)
+            joined = " ".join(plan.spec.errors)
+            self.assertIn("launch_cvd", joined)
+            self.assertIn("kvm", joined.lower())
+            self.assertIn("usermod", joined)
+
+    def test_auto_cuttlefish_guidance_when_launch_cvd_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_cuttlefish_product(Path(raw)))
+            plan = build_launch_plan(
+                product,
+                LaunchOptions(backend="auto", accel="tcg"),
+                _caps(emulator=None, launch_cvd=None),
+                accel=_tcg(),
+                emulator_help=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertFalse(plan.spec.bootable)
+            joined = " ".join(plan.spec.errors)
+            self.assertIn("launch_cvd", joined)
+            self.assertIn("android-cuttlefish", joined)
 
 
 if __name__ == "__main__":
