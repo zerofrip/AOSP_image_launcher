@@ -10,6 +10,7 @@ vendor_boot is never -initrd/-drive; super.img is never an ordinary disk.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -28,6 +29,32 @@ _ADB_DEFAULT_PORT = 5555
 def _qemu_format(path: Path) -> str:
     """Return 'qcow2' for .qcow2 files, otherwise 'raw'."""
     return "qcow2" if str(path).endswith(".qcow2") else "raw"
+
+
+def _probe_netdev_backends(qemu_path: Path | None) -> frozenset[str]:
+    """Return the netdev backend names this qemu-system-x86_64 was built with.
+
+    Some distro/source builds omit libslirp, so ``-netdev user`` is not always
+    available (it fails at runtime with "network backend 'user' is not
+    compiled into this binary", not at argv-construction time). ``-netdev
+    help`` reflects actual compile-time support, so probe it instead of
+    assuming ``user`` is always present.
+    """
+    if qemu_path is None:
+        return frozenset()
+    try:
+        result = subprocess.run(
+            [str(qemu_path), "-netdev", "help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return frozenset()
+    return frozenset(
+        line.strip() for line in result.stdout.splitlines() if line.strip()
+    )
 
 
 def _fail(
@@ -236,12 +263,38 @@ class QemuBackend(Backend):
                 argv += ["-drive", drv]
                 roles[role] = str(src)
 
-        # networking (user-mode slirp + hostfwd for ADB)
+        # networking: prefer user-mode slirp + hostfwd for ADB, but this
+        # qemu binary may have been built without libslirp (-netdev user is
+        # then rejected at runtime, not at argv time). Probe compiled-in
+        # backends first and degrade gracefully instead of emitting an argv
+        # that is guaranteed to fail to start.
         adb_port = int(options.adb_port)
-        argv += [
-            "-netdev", f"user,id=net0,hostfwd=tcp::{adb_port}-:5555",
-            "-device", "virtio-net-pci,netdev=net0",
-        ]
+        netdev_backends = _probe_netdev_backends(capabilities.qemu.path)
+        if "user" in netdev_backends:
+            argv += [
+                "-netdev", f"user,id=net0,hostfwd=tcp::{adb_port}-:5555",
+                "-device", "virtio-net-pci,netdev=net0",
+            ]
+        elif "passt" in netdev_backends and shutil.which("passt") is not None:
+            # qemu's "-netdev help" lists backend *types* it was compiled
+            # with, but "passt" also needs the external passt(1) helper
+            # binary on PATH at runtime (qemu execs it); "help" listing it
+            # does not guarantee that binary is installed.
+            argv += [
+                "-netdev", "passt,id=net0",
+                "-device", "virtio-net-pci,netdev=net0",
+            ]
+            warnings.append(
+                "qemu-system-x86_64 lacks the 'user' (slirp) netdev backend; "
+                "using 'passt' instead, but ADB hostfwd port mapping is not "
+                "configured for passt in v1 — ADB will not be reachable from the host"
+            )
+        else:
+            argv += ["-nic", "none"]
+            warnings.append(
+                "qemu-system-x86_64 has no usable netdev backend ('user' or 'passt' "
+                "not compiled in); networking disabled, ADB will not be reachable"
+            )
 
         # serial + safety
         argv += ["-serial", "mon:stdio", "-no-reboot"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import support  # noqa: F401
@@ -376,6 +377,95 @@ class GenericQemuBackendTests(unittest.TestCase):
             )
             self.assertFalse(spec.bootable)
             self.assertTrue(any("--extra-arg requires --allow-extra-args" in e for e in spec.errors))
+
+    def test_missing_netdev_backend_falls_back_to_no_network(self) -> None:
+        """A qemu-system-x86_64 without libslirp must still boot (no -netdev user)."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            # The mock binary's "-netdev help" prints nothing (plain shell stub),
+            # simulating a qemu build with no 'user' or 'passt' backend compiled in.
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable)
+            self.assertNotIn("-netdev", spec.argv)
+            self.assertIn("-nic", spec.argv)
+            self.assertEqual(spec.argv[spec.argv.index("-nic") + 1], "none")
+            self.assertTrue(any("netdev backend" in w for w in spec.warnings))
+
+    def test_netdev_user_used_when_available(self) -> None:
+        """When the qemu binary reports 'user' via -netdev help, prefer it (with hostfwd)."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = Path(raw) / "qemu-system-x86_64"
+            qemu_bin.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "-netdev" ] && [ "$2" = "help" ]; then\n'
+                '  echo "user"\n'
+                '  echo "socket"\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 0\n"
+            )
+            qemu_bin.chmod(0o755)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu", adb_port=5555),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable)
+            self.assertIn("-netdev", spec.argv)
+            netdev_value = spec.argv[spec.argv.index("-netdev") + 1]
+            self.assertIn("user", netdev_value)
+            self.assertIn("hostfwd=tcp::5555-:5555", netdev_value)
+
+    def test_passt_listed_but_helper_missing_falls_back_to_no_network(self) -> None:
+        """-netdev help listing 'passt' doesn't mean the passt(1) helper is installed."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = Path(raw) / "qemu-system-x86_64"
+            qemu_bin.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "-netdev" ] && [ "$2" = "help" ]; then\n'
+                '  echo "passt"\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 0\n"
+            )
+            qemu_bin.chmod(0o755)
+            with unittest.mock.patch("backends.qemu.shutil.which", return_value=None):
+                spec = QemuBackend().plan(
+                    product, LaunchOptions(backend="qemu"),
+                    _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+                )
+            self.assertTrue(spec.bootable)
+            self.assertNotIn("-netdev", spec.argv)
+            self.assertIn("-nic", spec.argv)
+            self.assertTrue(any("netdev backend" in w for w in spec.warnings))
+
+    def test_passt_used_when_helper_binary_present(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = Path(raw) / "qemu-system-x86_64"
+            qemu_bin.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "-netdev" ] && [ "$2" = "help" ]; then\n'
+                '  echo "passt"\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 0\n"
+            )
+            qemu_bin.chmod(0o755)
+            with unittest.mock.patch("backends.qemu.shutil.which", return_value="/usr/bin/passt"):
+                spec = QemuBackend().plan(
+                    product, LaunchOptions(backend="qemu"),
+                    _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+                )
+            self.assertTrue(spec.bootable)
+            self.assertIn("-netdev", spec.argv)
+            self.assertIn("passt", spec.argv[spec.argv.index("-netdev") + 1])
+            self.assertTrue(any("passt" in w for w in spec.warnings))
 
 
 class AutoBackendTests(unittest.TestCase):
