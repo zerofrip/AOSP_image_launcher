@@ -1,0 +1,305 @@
+"""Backend planning tests. Emulator -help is mocked; no real qemu spawn."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import support  # noqa: F401
+from support import make_cuttlefish_product, make_incomplete_ranchu, make_ranchu_product
+
+from backends.android_emulator import AndroidEmulatorBackend
+from backends.qemu import QemuBackend
+from capabilities import AccelSelection, Capabilities, HostEnvironment, ToolInfo
+from command_builder import build_launch_plan
+from models import LaunchOptions
+from product_out import inventory_product_out
+
+EMULATOR_HELP = """
+Android Emulator usage:
+  -sysdir <dir>
+  -kernel <file>
+  -ramdisk <file>
+  -system <file>
+  -vendor <file>
+  -data <file>
+  -memory <integer>
+  -cores <count>
+  -accel <accel>
+  -no-window
+  -ports <console>,<adb>
+  -writable-system
+  -read-only
+  -snapshot
+  -no-snapshot
+  -qemu
+"""
+
+
+def _host_linux() -> HostEnvironment:
+    return HostEnvironment(
+        platform="linux",
+        is_windows=False,
+        is_linux=True,
+        is_wsl=False,
+        kvm_node_exists=True,
+        kvm_accessible=True,
+        cpu_count=4,
+    )
+
+
+def _missing_tool(name: str) -> ToolInfo:
+    return ToolInfo(name=name, path=None, available=False, error=f"{name} not found")
+
+
+def _caps(*, emulator: Path | None, qemu: Path | None = None) -> Capabilities:
+    emu = (
+        ToolInfo(name="emulator", path=emulator, available=emulator is not None, details="mock")
+        if emulator is not None
+        else _missing_tool("emulator")
+    )
+    qemu_tool = (
+        ToolInfo(name="qemu-system-x86_64", path=qemu, available=True, details="mock")
+        if qemu is not None
+        else _missing_tool("qemu-system-x86_64")
+    )
+    return Capabilities(
+        host=_host_linux(),
+        emulator=emu,
+        qemu=qemu_tool,
+        emulator_check=_missing_tool("emulator-check"),
+        unpack_bootimg=_missing_tool("unpack_bootimg"),
+        lpunpack=_missing_tool("lpunpack"),
+        simg2img=_missing_tool("simg2img"),
+        avbtool=_missing_tool("avbtool"),
+    )
+
+
+def _tcg() -> AccelSelection:
+    return AccelSelection(
+        requested="auto",
+        selected="tcg",
+        fallback=True,
+        reason="test mock; falling back to TCG",
+        available=("tcg",),
+    )
+
+
+def _whpx() -> AccelSelection:
+    return AccelSelection(
+        requested="whpx",
+        selected="whpx",
+        fallback=False,
+        reason="test mock WHPX",
+        available=("whpx", "tcg"),
+    )
+
+
+class EmulatorBackendTests(unittest.TestCase):
+    def test_whpx_accel_in_emulator_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_ranchu_product(Path(raw), "emu64x")
+            product = inventory_product_out(product_dir)
+            emulator_bin = Path(raw) / "emulator"
+            emulator_bin.write_text("#!/bin/sh\n")
+            spec = AndroidEmulatorBackend().plan(
+                product,
+                LaunchOptions(backend="emulator", accel="whpx", adb_port=5555, headless=True),
+                _caps(emulator=emulator_bin),
+                accel=_whpx(),
+                help_text=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertTrue(spec.bootable)
+            argv = spec.argv
+            self.assertIn("-accel", argv)
+            self.assertEqual(argv[argv.index("-accel") + 1], "on")
+            joined = " ".join(argv)
+            self.assertNotIn("hostfwd", joined)
+            self.assertNotIn("netdev", joined)
+
+    def test_ranchu_builds_emulator_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_ranchu_product(Path(raw), "emu64x")
+            product = inventory_product_out(product_dir)
+            emulator_bin = Path(raw) / "emulator"
+            emulator_bin.write_text("#!/bin/sh\n")
+            caps = _caps(emulator=emulator_bin)
+            spec = AndroidEmulatorBackend().plan(
+                product,
+                LaunchOptions(backend="emulator", accel="tcg", adb_port=5555, headless=True),
+                caps,
+                accel=_tcg(),
+                help_text=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertTrue(spec.bootable)
+            self.assertEqual(spec.support_state, "supported")
+            argv = spec.argv
+            self.assertEqual(argv[0], str(emulator_bin))
+            self.assertIn("-sysdir", argv)
+            self.assertIn("-kernel", argv)
+            self.assertIn("-ramdisk", argv)
+            self.assertIn("-system", argv)
+            self.assertIn("-vendor", argv)
+            self.assertIn("-data", argv)
+            self.assertIn("-memory", argv)
+            self.assertIn("-cores", argv)
+            self.assertIn("-accel", argv)
+            self.assertEqual(argv[argv.index("-accel") + 1], "off")
+            self.assertIn("-no-window", argv)
+            self.assertIn("-ports", argv)
+            self.assertEqual(argv[argv.index("-ports") + 1], "5554,5555")
+            joined = " ".join(argv)
+            self.assertNotIn("hostfwd", joined)
+            self.assertNotIn("netdev", joined)
+            self.assertNotIn("vendor_boot", joined)
+            self.assertNotIn("super.img", joined)
+
+    def test_cuttlefish_not_emulator(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_cuttlefish_product(Path(raw)))
+            spec = AndroidEmulatorBackend().plan(
+                product,
+                LaunchOptions(),
+                _caps(emulator=Path(raw) / "emulator"),
+                accel=_tcg(),
+                help_text=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertFalse(spec.bootable)
+            self.assertEqual(spec.argv, [])
+            self.assertTrue(any("launch_cvd" in err for err in spec.errors))
+
+    def test_incomplete_ranchu_not_bootable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_incomplete_ranchu(Path(raw)))
+            spec = AndroidEmulatorBackend().plan(
+                product,
+                LaunchOptions(),
+                _caps(emulator=Path(raw) / "emulator"),
+                accel=_tcg(),
+                help_text=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertFalse(spec.bootable)
+            self.assertEqual(spec.argv, [])
+
+    def test_extra_arg_requires_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_ranchu_product(Path(raw)))
+            emulator_bin = Path(raw) / "emulator"
+            emulator_bin.write_text("#!/bin/sh\n")
+            spec = AndroidEmulatorBackend().plan(
+                product,
+                LaunchOptions(extra_args=["-gpu", "off"]),
+                _caps(emulator=emulator_bin),
+                accel=_tcg(),
+                help_text=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertFalse(spec.bootable)
+            self.assertTrue(any("allow-extra-args" in err for err in spec.errors))
+            allowed = AndroidEmulatorBackend().plan(
+                product,
+                LaunchOptions(extra_args=["-gpu", "off"], allow_extra_args=True),
+                _caps(emulator=emulator_bin),
+                accel=_tcg(),
+                help_text=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertTrue(allowed.bootable)
+            self.assertEqual(allowed.argv[-2:], ["-gpu", "off"])
+            self.assertTrue(allowed.extra_args_applied)
+
+    def test_port_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_ranchu_product(Path(raw)))
+            emulator_bin = Path(raw) / "emulator"
+            emulator_bin.write_text("#!/bin/sh\n")
+            spec = AndroidEmulatorBackend().plan(
+                product,
+                LaunchOptions(adb_port=5555),
+                _caps(emulator=emulator_bin),
+                accel=_tcg(),
+                help_text=EMULATOR_HELP,
+                port_in_use=lambda port: port == 5555,
+            )
+            self.assertFalse(spec.bootable)
+            self.assertTrue(any("ports in use" in err for err in spec.errors))
+            self.assertTrue(any("hostfwd" in err for err in spec.errors))
+
+
+class QemuBackendTests(unittest.TestCase):
+    def test_fail_closed_cuttlefish(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_cuttlefish_product(Path(raw)))
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"), _caps(emulator=None), accel=_tcg()
+            )
+            self.assertEqual(spec.argv, [])
+            self.assertFalse(spec.bootable)
+            joined = " ".join(spec.errors).lower()
+            self.assertIn("launch_cvd", joined)
+            self.assertNotIn("-initrd", spec.argv)
+            self.assertTrue(any("vendor_boot" in err for err in spec.errors))
+            self.assertTrue(any("super.img" in err.lower() or "dynamic" in err.lower() for err in spec.errors))
+
+    def test_fail_closed_ranchu(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_ranchu_product(Path(raw)))
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"), _caps(emulator=None), accel=_tcg()
+            )
+            self.assertEqual(spec.argv, [])
+            self.assertFalse(spec.bootable)
+            self.assertTrue(any("goldfish" in err.lower() or "ranchu" in err.lower() for err in spec.errors))
+
+    def test_never_maps_vendor_boot_or_super(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_cuttlefish_product(Path(raw)))
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"), _caps(emulator=None), accel=_tcg()
+            )
+            blob = " ".join(spec.argv)
+            self.assertNotIn("vendor_boot", blob)
+            self.assertNotIn("super.img", blob)
+            self.assertFalse(spec.bootable)
+
+
+class AutoBackendTests(unittest.TestCase):
+    def test_auto_ranchu_uses_emulator(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_ranchu_product(Path(raw)))
+            emulator_bin = Path(raw) / "emulator"
+            emulator_bin.write_text("#!/bin/sh\n")
+            plan = build_launch_plan(
+                product,
+                LaunchOptions(backend="auto", accel="tcg"),
+                _caps(emulator=emulator_bin),
+                accel=_tcg(),
+                emulator_help=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertTrue(plan.spec.bootable)
+            self.assertEqual(plan.spec.backend, "emulator")
+
+    def test_auto_cuttlefish_recommends_launch_cvd(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_cuttlefish_product(Path(raw)))
+            plan = build_launch_plan(
+                product,
+                LaunchOptions(backend="auto", accel="tcg"),
+                _caps(emulator=None),
+                accel=_tcg(),
+                emulator_help=EMULATOR_HELP,
+                port_in_use=lambda _port: False,
+            )
+            self.assertFalse(plan.spec.bootable)
+            self.assertEqual(plan.spec.argv, [])
+            self.assertTrue(any("launch_cvd" in err for err in plan.spec.errors))
+
+
+if __name__ == "__main__":
+    unittest.main()

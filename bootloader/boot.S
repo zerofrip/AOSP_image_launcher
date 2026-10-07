@@ -1,3 +1,5 @@
+# LEGACY 16-bit MBR stub. Prints a message and halts.
+# It is not an Android bootloader and is not used to boot AOSP x86_64.
 .code16
 .section .text
 .global _start

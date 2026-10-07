@@ -1,184 +1,288 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox, Menu, simpledialog
-import subprocess
+"""Tk frontend. Calls Python APIs directly — never assembles launcher.py CLI strings."""
+
+from __future__ import annotations
+
 import os
+import queue
+import subprocess
 import sys
+import threading
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext
+
+_SRC = Path(__file__).resolve().parent
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from capabilities import detect_host, discover_tools  # noqa: E402
+from command_builder import build_launch_plan, format_command_redacted  # noqa: E402
+from errors import LauncherError  # noqa: E402
+from models import LaunchOptions  # noqa: E402
+from product_out import inventory_product_out, resolve_product_out  # noqa: E402
+
 
 class StartLoaderGUI:
-    def __init__(self, root):
+    def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("StartLoader - Android Emulator")
-        self.root.geometry("600x400")
+        self.root.title("StartLoader — AOSP x86_64 PRODUCT_OUT")
+        self.root.geometry("840x640")
+        self.product_out_var = tk.StringVar()
+        self.backend_var = tk.StringVar(value="auto")
+        self.accel_var = tk.StringVar(value="auto")
+        self.memory_var = tk.IntVar(value=4096)
+        self.cpus_var = tk.IntVar(value=max(1, min(4, os.cpu_count() or 1)))
+        self.adb_port_var = tk.IntVar(value=5555)
+        self.headless_var = tk.BooleanVar(value=False)
+        self.read_only_var = tk.BooleanVar(value=False)
+        self.status_var = tk.StringVar(value="Select a PRODUCT_OUT directory.")
+        self.bootable = False
+        self.plan = None
+        self.product = None
+        self.process: subprocess.Popen | None = None
+        self.log_queue: queue.Queue[str] = queue.Queue()
+        self._build()
+        self.root.after(200, self._drain_logs)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self.bootloader_path = tk.StringVar()
-        self.recovery_path = tk.StringVar()
-        self.system_image_path = tk.StringVar()
-        self.firmware_path = tk.StringVar()
-        self.device_ready = False
-        self.storage_path = tk.StringVar()
-        self.storage_size = tk.StringVar(value="16G")
-
-        self.create_menu()
-        self.create_status_view()
-
-    def create_menu(self):
-        menubar = Menu(self.root)
-
-        # Environment Menu
-        env_menu = Menu(menubar, tearoff=0)
-        env_menu.add_command(label="Select Bootloader", command=self.select_bootloader)
-        env_menu.add_command(label="Select Recovery Image", command=self.select_recovery)
-        menubar.add_cascade(label="Environment", menu=env_menu)
-
-        # System Menu
-        system_menu = Menu(menubar, tearoff=0)
-        system_menu.add_command(label="Load Image", command=self.load_system_image)
-        menubar.add_cascade(label="System", menu=system_menu)
-
-        # Machine Menu
-        machine_menu = Menu(menubar, tearoff=0)
-        machine_menu.add_command(label="Compile and Create Device", command=self.create_device)
-        machine_menu.add_command(label="Select Firmware", command=self.select_firmware)
-        machine_menu.add_separator()
-        machine_menu.add_command(label="Start Bootloader", command=self.start_bootloader)
-        menubar.add_cascade(label="Machine", menu=machine_menu)
-
-        # Virtual Phone Menu
-        phone_menu = Menu(menubar, tearoff=0)
-        stock_rom_menu = Menu(phone_menu, tearoff=0)
-        stock_rom_menu.add_command(label="From Zero", command=self.load_system_image)
-        phone_menu.add_cascade(label="Install Stock ROM", menu=stock_rom_menu)
-        menubar.add_cascade(label="Virtual Phone", menu=phone_menu)
-
-        # Extras Menu
-        extras_menu = Menu(menubar, tearoff=0)
-        extras_menu.add_command(label="Custom ROM Creator", command=self.launch_rom_creator)
-        menubar.add_cascade(label="Extras", menu=extras_menu)
-
+    def _build(self) -> None:
+        menubar = tk.Menu(self.root)
+        extras = tk.Menu(menubar, tearoff=0)
+        extras.add_command(
+            label="Custom ROM Creator (legacy mock — non-functional)",
+            command=self.launch_rom_creator,
+        )
+        menubar.add_cascade(label="Extras", menu=extras)
         self.root.config(menu=menubar)
 
-    def create_status_view(self):
-        frame = tk.Frame(self.root, padx=20, pady=20)
-        frame.pack(fill=tk.BOTH, expand=True)
+        top = tk.Frame(self.root, padx=12, pady=8)
+        top.pack(fill=tk.X)
+        tk.Label(top, text="PRODUCT_OUT:").pack(side=tk.LEFT)
+        tk.Entry(top, textvariable=self.product_out_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=6
+        )
+        tk.Button(top, text="Browse…", command=self.browse_product_out).pack(side=tk.LEFT)
 
-        tk.Label(frame, text="Current Configuration:", font=("Helvetica", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        opts = tk.Frame(self.root, padx=12)
+        opts.pack(fill=tk.X, pady=2)
+        tk.Label(opts, text="backend").pack(side=tk.LEFT)
+        tk.OptionMenu(opts, self.backend_var, "auto", "emulator", "qemu").pack(side=tk.LEFT)
+        tk.Label(opts, text="accel").pack(side=tk.LEFT, padx=(8, 0))
+        tk.OptionMenu(opts, self.accel_var, "auto", "whpx", "kvm", "tcg").pack(side=tk.LEFT)
+        tk.Label(opts, text="memory").pack(side=tk.LEFT, padx=(8, 0))
+        tk.Spinbox(opts, from_=1, to=65536, textvariable=self.memory_var, width=6).pack(side=tk.LEFT)
+        tk.Label(opts, text="cpus").pack(side=tk.LEFT, padx=(8, 0))
+        tk.Spinbox(opts, from_=1, to=64, textvariable=self.cpus_var, width=3).pack(side=tk.LEFT)
+        tk.Label(opts, text="adb").pack(side=tk.LEFT, padx=(8, 0))
+        tk.Spinbox(opts, from_=1, to=65535, textvariable=self.adb_port_var, width=6).pack(side=tk.LEFT)
+        tk.Checkbutton(opts, text="headless", variable=self.headless_var).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Checkbutton(opts, text="read-only", variable=self.read_only_var).pack(side=tk.LEFT)
 
-        tk.Label(frame, text="Bootloader:").grid(row=1, column=0, sticky="w")
-        tk.Label(frame, textvariable=self.bootloader_path, wraplength=400).grid(row=1, column=1, sticky="w", padx=10)
+        buttons = tk.Frame(self.root, padx=12)
+        buttons.pack(fill=tk.X, pady=4)
+        tk.Button(buttons, text="Diagnose", command=self.run_diagnose).pack(side=tk.LEFT, padx=2)
+        tk.Button(buttons, text="Preview", command=self.preview_command).pack(side=tk.LEFT, padx=2)
+        self.launch_btn = tk.Button(
+            buttons, text="Launch", command=self.launch, state=tk.DISABLED
+        )
+        self.launch_btn.pack(side=tk.LEFT, padx=2)
+        tk.Button(buttons, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=2)
+        tk.Label(self.root, textvariable=self.status_var, anchor="w", padx=12).pack(fill=tk.X)
 
-        tk.Label(frame, text="Recovery:").grid(row=2, column=0, sticky="w")
-        tk.Label(frame, textvariable=self.recovery_path, wraplength=400).grid(row=2, column=1, sticky="w", padx=10)
+        self.log = scrolledtext.ScrolledText(self.root, height=28, wrap=tk.WORD)
+        self.log.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
 
-        tk.Label(frame, text="System Image:").grid(row=3, column=0, sticky="w")
-        tk.Label(frame, textvariable=self.system_image_path, wraplength=400).grid(row=3, column=1, sticky="w", padx=10)
+    def browse_product_out(self) -> None:
+        chosen = filedialog.askdirectory(title="Select AOSP PRODUCT_OUT")
+        if chosen:
+            self.product_out_var.set(chosen)
+            self.run_diagnose()
 
-        tk.Label(frame, text="Firmware:").grid(row=4, column=0, sticky="w")
-        tk.Label(frame, textvariable=self.firmware_path, wraplength=400).grid(row=4, column=1, sticky="w", padx=10)
+    def _options(self) -> LaunchOptions:
+        return LaunchOptions(
+            backend=self.backend_var.get() or "auto",
+            accel=self.accel_var.get() or "auto",
+            memory_mb=int(self.memory_var.get()),
+            cpus=int(self.cpus_var.get()),
+            adb_port=int(self.adb_port_var.get()),
+            headless=bool(self.headless_var.get()),
+            read_only=bool(self.read_only_var.get()),
+        )
 
-        tk.Label(frame, text="Storage Size:").grid(row=5, column=0, sticky="w")
-        tk.Entry(frame, textvariable=self.storage_size, width=10).grid(row=5, column=1, sticky="w", padx=10)
+    def _inspect(self):
+        path = self.product_out_var.get().strip()
+        if not path:
+            messagebox.showwarning("PRODUCT_OUT", "Select a PRODUCT_OUT directory first.")
+            return None
+        resolved = resolve_product_out(path)
+        product = inventory_product_out(resolved)
+        caps = discover_tools(product_out=product.product_out, host=detect_host())
+        plan = build_launch_plan(product, self._options(), caps)
+        return product, caps, plan
 
-    def select_bootloader(self):
-        path = filedialog.askopenfilename(title="Select Bootloader", filetypes=[("Binary files", "*.bin"), ("All files", "*.*")])
-        if path:
-            self.bootloader_path.set(path)
-
-    def select_recovery(self):
-        path = filedialog.askopenfilename(title="Select Recovery Image", filetypes=[("Image files", "*.img"), ("All files", "*.*")])
-        if path:
-            self.recovery_path.set(path)
-
-    def load_system_image(self):
-        path = filedialog.askopenfilename(title="Load System Image", filetypes=[("Image files", "*.img"), ("All files", "*.*")])
-        if path:
-            self.system_image_path.set(path)
-
-    def select_firmware(self):
-        path = filedialog.askopenfilename(title="Select Firmware", filetypes=[("Firmware files", "*.zip;*.tar.gz"), ("All files", "*.*")])
-        if path:
-            self.firmware_path.set(path)
-
-    def create_device(self):
-        if not self.bootloader_path.get() or not self.system_image_path.get():
-            messagebox.showwarning("Warning", "Please select a bootloader and system image first.")
-            return
-
-        # Sizing the GPT - Asking for total storage
-        size_str = simpledialog.askstring("Sizing GPT", "How much total storage to give? (e.g. 16G, minimum 4G):",
-                                         initialvalue=self.storage_size.get())
-        if not size_str:
-            return
-
-        size_str = size_str.upper()
-
+    def run_diagnose(self) -> None:
         try:
-            # Simple parser for G, M, K
-            multiplier = 1024 * 1024 * 1024 # Default G
-            if size_str.endswith('G'):
-                multiplier = 1024 * 1024 * 1024
-                size_val = int(size_str[:-1])
-            elif size_str.endswith('M'):
-                multiplier = 1024 * 1024
-                size_val = int(size_str[:-1])
-            elif size_str.endswith('K'):
-                multiplier = 1024
-                size_val = int(size_str[:-1])
-            else:
-                size_val = int(size_str)
+            from launcher import format_diagnose_report
 
-            total_size = size_val * multiplier
-
-            # Enforce minimum size (e.g. 4GB)
-            if total_size < 4 * 1024 * 1024 * 1024:
-                messagebox.showerror("Error", "Minimum storage size is 4G.")
+            inspected = self._inspect()
+            if inspected is None:
                 return
+            product, caps, plan = inspected
+            self.product = product
+            self.plan = plan
+            self.bootable = bool(plan.spec.bootable and plan.spec.argv)
+            self.launch_btn.config(state=tk.NORMAL if self.bootable else tk.DISABLED)
+            report = format_diagnose_report(product, caps, plan)
+            self._set_log(report)
+            self.status_var.set(
+                f"family={product.family} arch={product.architecture} bootable={plan.spec.bootable}"
+            )
+        except LauncherError as exc:
+            self.bootable = False
+            self.plan = None
+            self.launch_btn.config(state=tk.DISABLED)
+            self.status_var.set("diagnosis failed")
+            self._set_log(f"error: {exc}\n")
+        except Exception as exc:
+            self.bootable = False
+            self.plan = None
+            self.launch_btn.config(state=tk.DISABLED)
+            self.status_var.set("diagnosis failed")
+            self._set_log(f"error: {exc}\n")
 
-            self.storage_size.set(size_str)
-            self.storage_path.set("assets/system_images/userdata.img")
+    def preview_command(self) -> None:
+        try:
+            inspected = self._inspect()
+        except Exception as exc:
+            self._append_log(f"error: {exc}\n")
+            return
+        if inspected is None:
+            return
+        product, _caps, plan = inspected
+        self.product = product
+        self.plan = plan
+        self.bootable = bool(plan.spec.bootable and plan.spec.argv)
+        self.launch_btn.config(state=tk.NORMAL if self.bootable else tk.DISABLED)
+        spec = plan.spec
+        if not spec.argv:
+            self._append_log("No executable launch plan (argv empty).\n")
+            return
+        text = format_command_redacted(spec.argv, windows=os.name == "nt")
+        self._append_log("\nPreview (not executed):\n" + text + "\n")
 
-            # Mocking device creation/storage allocation
-            if not os.path.exists("assets/system_images"):
-                os.makedirs("assets/system_images")
+    def launch(self) -> None:
+        try:
+            inspected = self._inspect()
+        except Exception as exc:
+            messagebox.showerror("Launch", str(exc))
+            return
+        if inspected is None:
+            return
+        product, _caps, plan = inspected
+        self.product = product
+        self.plan = plan
+        self.bootable = bool(plan.spec.bootable and plan.spec.argv)
+        self.launch_btn.config(state=tk.NORMAL if self.bootable else tk.DISABLED)
+        if not self.bootable or not plan.spec.argv:
+            messagebox.showwarning("Launch", "Launch is disabled because bootable is False.")
+            return
+        if self.process is not None and self.process.poll() is None:
+            messagebox.showinfo("Launch", "A guest process is already running.")
+            return
+        argv = list(plan.spec.argv)
+        if self.product is not None:
+            try:
+                import userdata as userdata_mod
 
-            # Provision the storage file by seeking to the end and truncating
-            # This creates a sparse file on supported filesystems
-            with open(self.storage_path.get(), "wb") as f:
-                f.truncate(total_size)
+                instance = userdata_mod.prepare_instance(
+                    self.product, read_only=bool(self.read_only_var.get())
+                )
+                if instance.userdata is not None and "-data" in argv:
+                    idx = argv.index("-data")
+                    argv[idx + 1] = str(instance.userdata)
+            except LauncherError as exc:
+                messagebox.showerror("Launch", str(exc))
+                return
+        self._append_log("\nStarting:\n" + format_command_redacted(argv, windows=os.name == "nt") + "\n")
+        thread = threading.Thread(target=self._spawn, args=(argv,), daemon=True)
+        thread.start()
 
-            self.device_ready = True
-            messagebox.showinfo("Success", f"Device storage of {size_str} allocated. Device created successfully.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to create device: {e}")
+    def _spawn(self, argv: list[str]) -> None:
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                shell=False,
+            )
+        except Exception as exc:
+            self.log_queue.put(f"failed to start: {exc}\n")
+            return
+        self.process = proc
+        self.log_queue.put(f"pid {proc.pid} started\n")
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            self.log_queue.put(line)
+        code = proc.wait()
+        self.log_queue.put(f"process exited {code}\n")
 
-    def launch_rom_creator(self):
+    def stop(self) -> None:
+        proc = self.process
+        if proc is None or proc.poll() is not None:
+            self.status_var.set("no running guest")
+            return
+        proc.terminate()
+        self.status_var.set("sent SIGTERM")
+        self.root.after(50, lambda: self._wait_then_kill(proc, 50))
+
+    def _wait_then_kill(self, proc: subprocess.Popen, waited_ms: int) -> None:
+        if proc.poll() is not None:
+            self.status_var.set(f"stopped (exit {proc.returncode})")
+            return
+        if waited_ms >= 5000:
+            proc.kill()
+            self.status_var.set("sent SIGKILL after timeout")
+            return
+        self.root.after(200, lambda: self._wait_then_kill(proc, waited_ms + 200))
+
+    def launch_rom_creator(self) -> None:
         try:
             from extras import rom_creator
+
             rom_creator.launch()
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to launch ROM Creator: {e}")
+        except Exception as exc:
+            messagebox.showerror("ROM Creator", f"Failed to open legacy mock: {exc}")
 
-    def start_bootloader(self):
-        if not self.device_ready:
-            messagebox.showwarning("Warning", "Please create the device first.")
-            return
-
-        qemu_cmd = [
-            sys.executable, "src/launcher.py",
-            "--bootloader", self.bootloader_path.get(),
-            "--image", self.system_image_path.get(),
-            "--recovery", self.recovery_path.get(),
-            "--firmware", self.firmware_path.get(),
-            "--storage", self.storage_path.get()
-        ]
-
+    def _drain_logs(self) -> None:
         try:
-            # We use Popen to not block the GUI
-            subprocess.Popen(qemu_cmd)
-            messagebox.showinfo("Info", "Emulator started.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to start emulator: {e}")
+            while True:
+                self.log.insert(tk.END, self.log_queue.get_nowait())
+                self.log.see(tk.END)
+        except queue.Empty:
+            pass
+        self.root.after(200, self._drain_logs)
+
+    def _set_log(self, text: str) -> None:
+        self.log.delete("1.0", tk.END)
+        self.log.insert(tk.END, text)
+
+    def _append_log(self, text: str) -> None:
+        self.log.insert(tk.END, text)
+        self.log.see(tk.END)
+
+    def _on_close(self) -> None:
+        proc = self.process
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        self.root.destroy()
+
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = StartLoaderGUI(root)
+    StartLoaderGUI(root)
     root.mainloop()

@@ -3,6 +3,7 @@ import os
 import sys
 
 def build_bootloader():
+    print("WARNING: This builds a legacy 16-bit MBR stub, not an Android bootloader.")
     # Attempt to find the best available toolchain
     toolchains = [
         {"as": "as", "ld": "ld"},

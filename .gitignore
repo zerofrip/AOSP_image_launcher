@@ -1,3 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+ENV/
+
+# Legacy 16-bit bootloader build artifacts
 bootloader/*.o
 bootloader/*.bin
+
+# Repo-local generated state (default runtime state is XDG/LOCALAPPDATA)
+.startloader/
+
+# Large or generated images in this tree (tiny test fixtures under tests/ are allowed)
+/assets/**/*.img
+/assets/**/*.bin
 fake_android.img
+
+# Unpacked boot/vendor_boot working trees
+**/unpacked_boot/
+**/unpacked_vendor_boot/
+**/.unpack-*/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/
+*.iml
