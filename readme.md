@@ -18,7 +18,21 @@ Python 3.11+, standard library only. Commands are built as argv lists (`shell=Tr
 
 **QEMU backend is fail-closed for `emulator_ranchu` and `cuttlefish`.** ranchu needs goldfish devices the stock qemu binary does not provide; Cuttlefish requires `launch_cvd`. Missing kernel/initrd/cmdline evidence, dynamic partitions, and `super.img` also refuse.
 
-**Generic x86_64 builds** (`product.family = "unknown"` — no `ro.hardware=ranchu/goldfish`, no Cuttlefish evidence): `qemu-system-x86_64` is now supported when `qemu-system-x86_64` is on PATH, architecture is `x86_64`, a kernel + ramdisk (or `boot.img` with `unpack_bootimg`) and `system.img` are available, and neither `vendor_boot` nor `super.img`/dynamic partitions are present. `vendor_boot` and `super.img` are still never attached as a regular disk on any family. The `emulator_ranchu` and `cuttlefish` families remain explicitly unsupported by this backend.
+**Generic x86_64 builds** (`product.family = "unknown"` — no `ro.hardware=ranchu/goldfish`, no Cuttlefish evidence): `qemu-system-x86_64` is now supported when `qemu-system-x86_64` is on PATH, architecture is `x86_64`, a kernel + ramdisk (or `boot.img`/`init_boot.img`/`vendor_boot.img` parsed natively — no external `unpack_bootimg` required) and `system.img` are available, and neither `vendor_boot` nor `super.img`/dynamic partitions are present. `vendor_boot` and `super.img` are still never attached as a regular disk on any family. The `emulator_ranchu` and `cuttlefish` families remain explicitly unsupported by this backend.
+
+This path has been verified to boot real Android userspace end to end:
+given just `boot.img` + `init_boot.img` + `vendor_boot.img` + `system.img`
++ `vendor.img` from a real AOSP x86_64 build (no standalone `kernel`/
+`ramdisk.img` files needed), the launcher natively combines the kernel +
+vendor/generic ramdisks + a synthetic, injected `/fstab.<hardware>` +
+`androidboot.partition_map`/`androidboot.boot_devices` (so fs_mgr can
+create `/dev/block/by-name/<partition>` symlinks for this flat,
+GPT-less, one-partition-per-virtio-disk layout) and real Android's
+first-stage init successfully mounts `/system` and `/vendor`, loads the
+SELinux policy, and reaches second-stage init parsing real `init.rc`
+service definitions (zygote, apexd, aconfigd, …). Additional partitions
+(`vendor.img`, `product.img`, `system_ext.img`, `userdata.img`) are
+auto-attached the same way when present in `PRODUCT_OUT`.
 
 ### Friendlier QEMU boot flow
 
