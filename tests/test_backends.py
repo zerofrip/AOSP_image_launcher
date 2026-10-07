@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import tempfile
 import unittest
 from pathlib import Path
@@ -294,7 +295,8 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertTrue(spec.bootable)
             self.assertIn("-kernel", spec.argv)
             self.assertIn("-initrd", spec.argv)
-            self.assertTrue(any("-drive" in a and "system" in a for a in spec.argv))
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            self.assertTrue(any("system" in v for v in drive_values))
             self.assertIn("-accel", spec.argv)
             self.assertNotIn("vendor_boot", " ".join(spec.argv))
             self.assertNotIn("super.img", " ".join(spec.argv))
@@ -317,7 +319,7 @@ class GenericQemuBackendTests(unittest.TestCase):
             qemu_bin = self._make_qemu_bin(raw)
             # Override with nonexistent kernel path
             spec = QemuBackend().plan(
-                product._replace(kernel=None),
+                dataclasses.replace(product, kernel=None),
                 LaunchOptions(backend="qemu", kernel=None),
                 _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
             )
@@ -329,7 +331,7 @@ class GenericQemuBackendTests(unittest.TestCase):
             product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
             qemu_bin = self._make_qemu_bin(raw)
             spec = QemuBackend().plan(
-                product._replace(system=None),
+                dataclasses.replace(product, system=None),
                 LaunchOptions(backend="qemu", system=None),
                 _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
             )
@@ -356,7 +358,7 @@ class GenericQemuBackendTests(unittest.TestCase):
             product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
             qemu_bin = self._make_qemu_bin(raw)
             spec = QemuBackend().plan(
-                product._replace(dynamic_partitions=True),
+                dataclasses.replace(product, dynamic_partitions=True),
                 LaunchOptions(backend="qemu"),
                 _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
             )
