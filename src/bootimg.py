@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import re
 import struct
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -238,6 +240,123 @@ def _finish_bootconfig_trailer(params: bytes) -> bytes:
     return params + trailer
 
 
+_LZ4_LEGACY_MAGIC = b"\x02\x21\x4c\x18"
+
+
+def _looks_like_legacy_lz4(data: bytes) -> bool:
+    return data[:4] == _LZ4_LEGACY_MAGIC
+
+
+def _lz4_decompress(data: bytes) -> bytes:
+    """Decompress legacy-framed LZ4 data via the external ``lz4`` CLI tool.
+
+    No pure-Python legacy-LZ4-frame decoder is implemented, so this
+    requires ``lz4`` on PATH. Raises BootImageError if it is unavailable
+    or decompression fails — callers should treat that as "best-effort
+    enhancement unavailable", not a fatal error for the overall boot.img
+    parse.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "in.lz4"
+        dst = Path(td) / "out"
+        src.write_bytes(data)
+        try:
+            subprocess.run(
+                ["lz4", "-d", "-f", str(src), str(dst)],
+                check=True, capture_output=True, timeout=30,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise BootImageError(f"lz4 decompress failed: {exc}") from exc
+        return dst.read_bytes()
+
+
+def _lz4_compress_legacy(data: bytes) -> bytes:
+    """Compress to legacy-framed LZ4 via the external ``lz4`` CLI tool
+    (``-l``), matching the framing Android's own ramdisk tooling uses
+    (verified against real build artifacts: generic/vendor ramdisk
+    sections start with the legacy frame magic ``02 21 4C 18``, not the
+    modern LZ4 frame magic)."""
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "in"
+        dst = Path(td) / "out.lz4"
+        src.write_bytes(data)
+        try:
+            subprocess.run(
+                ["lz4", "-l", "-f", str(src), str(dst)],
+                check=True, capture_output=True, timeout=30,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise BootImageError(f"lz4 compress failed: {exc}") from exc
+        return dst.read_bytes()
+
+
+def _find_cpio_trailer_offset(data: bytes) -> int:
+    """Walk a plain (uncompressed) newc cpio stream by header fields to
+    find the byte offset where its ``TRAILER!!!`` entry begins."""
+    pos = 0
+    while pos + 110 <= len(data):
+        if data[pos:pos + 6] != b"070701":
+            raise BootImageError(f"not a newc cpio stream at offset {pos}")
+        fields = [
+            int(data[pos + 6 + i * 8:pos + 6 + i * 8 + 8], 16) for i in range(13)
+        ]
+        namesize = fields[11]
+        filesize = fields[6]
+        name_start = pos + 6 + 13 * 8
+        name = data[name_start:name_start + namesize].split(b"\x00", 1)[0]
+        header_end = name_start + namesize
+        header_end_padded = header_end + (-header_end) % 4
+        if name == b"TRAILER!!!":
+            return pos
+        data_end = header_end_padded + filesize
+        data_end_padded = data_end + (-data_end) % 4
+        pos = data_end_padded
+    raise BootImageError("cpio TRAILER!!! entry not found")
+
+
+def _splice_into_ramdisk_cpio(existing_ramdisk: bytes, extra_ramdisk: bytes) -> bytes:
+    """Insert ``extra_ramdisk``'s cpio entries into ``existing_ramdisk``'s
+    own cpio stream, before its ``TRAILER!!!`` entry, preserving whatever
+    compression ``existing_ramdisk`` already had.
+
+    This exists because simply concatenating a *third* independent cpio
+    archive after the vendor+generic pair is not reliably unpacked by the
+    Linux kernel's early-userspace initramfs code in practice — verified
+    by live first-stage-console tracing: a well-formed, correctly aligned
+    third segment (plain, gzip, or even LZ4-compressed to match) causes
+    the kernel to abandon cpio extraction partway through and instead
+    preserve the unconsumed remainder as ``/initrd.image``, rather than
+    continuing to unpack it. Splicing into the *existing* second segment
+    and recompressing it as a single stream keeps the segment count at
+    exactly two (vendor + generic), which is reliably supported, and was
+    confirmed working end-to-end against real boot/init_boot/vendor_boot
+    images.
+
+    Raises BootImageError if ``existing_ramdisk``'s compression can't be
+    recognized/round-tripped (currently: legacy-LZ4 or plain cpio only;
+    LZ4 round-trip additionally requires the external ``lz4`` CLI tool).
+    Callers should treat that as "best-effort enhancement unavailable"
+    and fall back to not injecting ``extra_ramdisk``, not as fatal.
+    """
+    if _looks_like_legacy_lz4(existing_ramdisk):
+        plain = _lz4_decompress(existing_ramdisk)
+        recompress = True
+    elif existing_ramdisk[:6] == b"070701":
+        plain = existing_ramdisk
+        recompress = False
+    else:
+        raise BootImageError(
+            "ramdisk is neither legacy-LZ4 nor plain cpio; cannot splice into it"
+        )
+
+    trailer_off = _find_cpio_trailer_offset(plain)
+    spliced_plain = plain[:trailer_off] + extra_ramdisk
+
+    if recompress:
+        return _lz4_compress_legacy(spliced_plain)
+    return spliced_plain
+
+
 def build_combined_initrd(
     boot: BootSections,
     init_boot: BootSections | None,
@@ -248,14 +367,15 @@ def build_combined_initrd(
     """Combine boot/init_boot/vendor_boot sections into (initrd_bytes, cmdline).
 
     Combining order (matches the real bootloader's in-memory layout):
-    vendor ramdisk(s) + generic ramdisk + extra_ramdisk + bootconfig trailer.
+    vendor ramdisk(s) + generic ramdisk + bootconfig trailer.
 
-    ``extra_ramdisk`` (optional) is inserted *before* the bootconfig
-    trailer — the trailer's "#BOOTCONFIG\n" magic must remain the very
-    last bytes of the initrd for the kernel's bootconfig parser to find
-    it, so nothing may be appended after it. Pass e.g. a synthetic
-    ``/fstab.<hardware>`` cpio archive here to inject it without
-    disturbing the bootconfig trailer's position.
+    ``extra_ramdisk`` (optional, e.g. a synthetic ``/fstab.<hardware>``
+    cpio archive) is not appended as a separate segment — it is spliced
+    into the *generic* ramdisk's own cpio stream before its own trailer,
+    and that stream is recompressed as a single unit, on a best-effort
+    basis (see ``_splice_into_ramdisk_cpio``). The final bootconfig
+    trailer's "#BOOTCONFIG\n" magic always remains the very last bytes of
+    the initrd, as the kernel's bootconfig parser requires.
 
     Raises BootImageError if no usable kernel or ramdisk can be assembled.
     """
@@ -281,7 +401,20 @@ def build_combined_initrd(
     bootconfig_params = vendor_boot.bootconfig if vendor_boot is not None else b""
     bootconfig = _finish_bootconfig_trailer(bootconfig_params) if bootconfig_params else b""
 
-    combined = vendor_ramdisk + generic_ramdisk + extra_ramdisk + bootconfig
+    if extra_ramdisk:
+        # Splice into the generic ramdisk's own cpio stream and recompress
+        # it as a single stream, instead of appending a third independent
+        # segment (which the kernel does not reliably unpack — see
+        # _splice_into_ramdisk_cpio's docstring). Best-effort: if splicing
+        # isn't possible in this environment (unrecognized compression,
+        # missing external lz4 tool, …), proceed without the enhancement
+        # rather than failing the whole native boot.img parse.
+        try:
+            generic_ramdisk = _splice_into_ramdisk_cpio(generic_ramdisk, extra_ramdisk)
+        except BootImageError:
+            pass
+
+    combined = vendor_ramdisk + generic_ramdisk + bootconfig
 
     cmdline_parts = []
     if vendor_boot is not None and vendor_boot.cmdline:
@@ -336,6 +469,39 @@ def pack_cpio_newc(entries: list[tuple[str, bytes]]) -> bytes:
     return bytes(out)
 
 
+_PCI_BOOT_DEVICE_PREFIX = "pci0000:00/0000:00:"
+_PCI_SLOT_BASE = 0x10  # high, fixed slot range, clear of any QEMU default devices
+
+
+def build_pci_boot_devices(count: int) -> tuple[str, list[int]]:
+    """Build (androidboot.boot_devices cmdline value, [pci slot per drive]).
+
+    fs_mgr/init only creates ``/dev/block/by-name/<partition>`` symlinks
+    for a uevent whose sysfs PCI path is listed in ``androidboot.
+    boot_devices`` (confirmed by reading system/core/init/devices.cpp:
+    the by-name-from-partition_map symlink is gated behind
+    ``info.is_boot_device``, which is exactly this comparison — it is
+    *not* optional the way ``IsBootDeviceStrict()``'s separate "require
+    partitions to be on the boot device" check is). The value is a
+    comma-separated list of ``pci0000:00/0000:00:<slot_hex>.0`` sysfs
+    path fragments, matching the format Cuttlefish's own qemu_manager.cpp
+    (``ConfigureMultipleBootDevices``) generates.
+
+    Each drive here is given an explicit, fixed PCI slot (starting at a
+    high, unambiguous slot number well clear of any machine-default
+    devices on PCI slots 0-2) via ``-device virtio-blk-pci,addr=0x..``,
+    so the resulting sysfs path is deterministic instead of relying on
+    whatever slot QEMU would have auto-assigned to an implicit
+    ``if=virtio`` drive.
+    """
+
+    slots = [_PCI_SLOT_BASE + i for i in range(count)]
+    boot_devices = ",".join(
+        f"{_PCI_BOOT_DEVICE_PREFIX}{slot:02x}.0" for slot in slots
+    )
+    return boot_devices, slots
+
+
 def build_partition_map_and_fstab(
     roles: list[str],
     *,
@@ -369,10 +535,14 @@ def build_partition_map_and_fstab(
         mount_point = f"/{name}"
         if name == "data":
             for fstype in ("f2fs", "ext4"):
-                lines.append(f"{device} /data {fstype} noatime,nosuid,nodev wait")
+                lines.append(
+                    f"{device} /data {fstype} noatime,nosuid,nodev wait,first_stage_mount"
+                )
         else:
             for fstype in ("erofs", "ext4"):
-                lines.append(f"{device} {mount_point} {fstype} ro wait")
+                lines.append(
+                    f"{device} {mount_point} {fstype} ro wait,first_stage_mount"
+                )
 
     fstab_text = "\n".join(lines) + "\n"
     fstab_filename = f"fstab.{hardware}"

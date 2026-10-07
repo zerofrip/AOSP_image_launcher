@@ -21,6 +21,7 @@ from bootimg import (
     BootImageError,
     build_combined_initrd,
     build_partition_map_and_fstab,
+    build_pci_boot_devices,
     detect_hardware_property,
     pack_cpio_newc,
     read_boot_image,
@@ -281,6 +282,10 @@ class QemuBackend(Backend):
                     partition_map, fstab_name, fstab_text = build_partition_map_and_fstab(
                         role_names, hardware=hardware_name
                     )
+                    boot_devices, pci_slots = build_pci_boot_devices(len(drives))
+                    # drives[i] gets PCI slot pci_slots[i] — the drive-building
+                    # section below (-device virtio-blk-pci,addr=...) must use
+                    # the exact same slot assignment for this to be correct.
                     # Some vendor ramdisks (e.g. GKI "first_stage_ramdisk" layout)
                     # switch_root into a "/first_stage_ramdisk" subtree before
                     # first-stage mount even looks for the fstab; place the
@@ -304,6 +309,7 @@ class QemuBackend(Backend):
                             boot_cmdline,
                             "androidboot.force_normal_boot=1",
                             f"androidboot.partition_map={partition_map}",
+                            f"androidboot.boot_devices={boot_devices}",
                         ] if s.strip()
                     )
 
@@ -396,16 +402,29 @@ class QemuBackend(Backend):
         # vendor/product/system_ext/data that are present) — same order the
         # native boot.img path used to build androidboot.partition_map, so
         # the virtio-blk device naming (vda, vdb, ...) the guest kernel
-        # assigns actually matches what we told it.
+        # assigns actually matches what we told it. Each drive also gets an
+        # explicit, fixed PCI slot (matching androidboot.boot_devices) —
+        # fs_mgr/init only creates a by-name symlink for a partition_map
+        # entry when the device's sysfs PCI path is listed in
+        # androidboot.boot_devices (confirmed by reading
+        # system/core/init/devices.cpp); relying on whatever slot QEMU
+        # would auto-assign to an implicit "-drive if=virtio" makes that
+        # value unknowable in advance, so assign it ourselves instead.
+        _unused_boot_devices, pci_slots = build_pci_boot_devices(len(drives))
         roles: dict[str, str] = {}
-        for role, src in drives:
+        for index, (role, src) in enumerate(drives):
             fmt = _qemu_format(src)
-            drv = f"file={src},format={fmt},if=virtio"
+            drive_id = f"drive{index}"
+            drv = f"file={src},format={fmt},if=none,id={drive_id}"
             if role == "system" and options.writable_system:
                 pass
             else:
                 drv += ",readonly=on"
             argv += ["-drive", drv]
+            argv += [
+                "-device",
+                f"virtio-blk-pci,drive={drive_id},addr=0x{pci_slots[index]:x}",
+            ]
             roles[role] = str(src)
 
         # networking: prefer user-mode slirp + hostfwd for ADB, but this

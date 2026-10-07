@@ -369,32 +369,73 @@ class CpioAndFstabTests(unittest.TestCase):
         _pm, fstab_name, _text = build_partition_map_and_fstab(["system"], hardware="cf")
         self.assertEqual(fstab_name, "fstab.cf")
 
-    def test_build_combined_initrd_with_extra_ramdisk_stays_before_bootconfig(self) -> None:
+    def test_build_combined_initrd_splices_extra_ramdisk_into_generic_cpio(self) -> None:
+        """extra_ramdisk must be spliced into the generic ramdisk's own cpio
+        stream (before its trailer) rather than appended as a separate
+        segment — appending a third independent segment is not reliably
+        unpacked by the real kernel (verified by live tracing; see
+        _splice_into_ramdisk_cpio's docstring), even though it looks
+        correct in isolation."""
+        from bootimg import pack_cpio_newc
+
         with tempfile.TemporaryDirectory() as raw:
+            generic_cpio = pack_cpio_newc([("original_file", b"ORIGINAL_CONTENT")])
             boot_path = _write(raw, "boot.img", _make_v3v4_boot(
                 header_version=4, kernel=b"K", ramdisk=b""
             ))
             init_boot_path = _write(raw, "init_boot.img", _make_v3v4_boot(
-                header_version=4, kernel=b"", ramdisk=b"GENERIC"
+                header_version=4, kernel=b"", ramdisk=generic_cpio
             ))
             vendor_boot_path = _write(raw, "vendor_boot.img", _make_vendor_boot(
-                header_version=4, ramdisk=b"VENDOR", bootconfig=b"#BOOTCONFIGTRAILER"
+                header_version=4, ramdisk=b"VENDOR", bootconfig=b"BOOTCONFIGPARAMS"
             ))
             boot_sec = read_boot_image(boot_path)
             init_sec = read_boot_image(init_boot_path)
             vend_sec = read_vendor_boot_image(vendor_boot_path)
 
+            extra_cpio = pack_cpio_newc([("injected_file", b"INJECTED_CONTENT")])
             combined, _cmdline = build_combined_initrd(
-                boot_sec, init_sec, vend_sec, extra_ramdisk=b"EXTRA_FSTAB_CPIO"
+                boot_sec, init_sec, vend_sec, extra_ramdisk=extra_cpio
             )
+
             # the "#BOOTCONFIG\n" magic must remain the very last bytes
             self.assertTrue(combined.endswith(b"#BOOTCONFIG\n"))
-            # extra_ramdisk must appear between the generic ramdisk and the
-            # bootconfig params (original 19-byte params + 8-byte size/checksum
-            # + 12-byte magic trailer appended by _finish_bootconfig_trailer)
-            prefix = b"VENDOR" + b"GENERIC" + b"EXTRA_FSTAB_CPIO"
-            self.assertTrue(combined.startswith(prefix))
-            self.assertIn(b"#BOOTCONFIGTRAILER", combined[len(prefix):])
+            # vendor ramdisk is untouched, still the very first bytes
+            self.assertTrue(combined.startswith(b"VENDOR"))
+            # the spliced-in generic segment is one contiguous valid cpio
+            # stream (not a separate appended archive) containing BOTH the
+            # original generic file and the injected one
+            self.assertIn(b"original_file", combined)
+            self.assertIn(b"ORIGINAL_CONTENT", combined)
+            self.assertIn(b"injected_file", combined)
+            self.assertIn(b"INJECTED_CONTENT", combined)
+            # injected content must appear strictly after the generic
+            # ramdisk's own original content (spliced before its trailer,
+            # not before it)
+            self.assertLess(
+                combined.index(b"ORIGINAL_CONTENT"), combined.index(b"INJECTED_CONTENT")
+            )
+
+    def test_build_combined_initrd_falls_back_gracefully_when_splice_impossible(self) -> None:
+        """If the generic ramdisk isn't recognizable plain cpio or legacy
+        LZ4 (e.g. a raw placeholder in a synthetic test fixture),
+        build_combined_initrd must not raise — it just proceeds without
+        the extra_ramdisk enhancement."""
+        with tempfile.TemporaryDirectory() as raw:
+            boot_path = _write(raw, "boot.img", _make_v3v4_boot(
+                header_version=4, kernel=b"K", ramdisk=b""
+            ))
+            init_boot_path = _write(raw, "init_boot.img", _make_v3v4_boot(
+                header_version=4, kernel=b"", ramdisk=b"NOT_REAL_CPIO_OR_LZ4"
+            ))
+            boot_sec = read_boot_image(boot_path)
+            init_sec = read_boot_image(init_boot_path)
+
+            combined, _cmdline = build_combined_initrd(
+                boot_sec, init_sec, None, extra_ramdisk=b"SOMETHING"
+            )
+            self.assertIn(b"NOT_REAL_CPIO_OR_LZ4", combined)
+            self.assertNotIn(b"SOMETHING", combined)
 
 
 class DetectHardwarePropertyTests(unittest.TestCase):
@@ -431,3 +472,80 @@ class BootconfigTrailerTests(unittest.TestCase):
         self.assertEqual(size, len(params))
         self.assertEqual(checksum, sum(params) & 0xFFFFFFFF)
         self.assertEqual(trailer[8:], b"#BOOTCONFIG\n")
+
+
+class SpliceIntoRamdiskCpioTests(unittest.TestCase):
+    def test_splice_into_plain_cpio_before_trailer(self) -> None:
+        from bootimg import pack_cpio_newc, _splice_into_ramdisk_cpio
+        existing = pack_cpio_newc([("a.txt", b"AAA")])
+        extra = pack_cpio_newc([("b.txt", b"BBB")])
+        result = _splice_into_ramdisk_cpio(existing, extra)
+        self.assertIn(b"a.txt", result)
+        self.assertIn(b"AAA", result)
+        self.assertIn(b"b.txt", result)
+        self.assertIn(b"BBB", result)
+        self.assertLess(result.index(b"AAA"), result.index(b"BBB"))
+        # result must still be a single, valid, extractable cpio stream
+        # (ends with exactly one TRAILER!!!, not two)
+        self.assertEqual(result.count(b"TRAILER!!!"), 1)
+
+    def test_splice_raises_on_unrecognized_format(self) -> None:
+        from bootimg import _splice_into_ramdisk_cpio
+        with self.assertRaises(BootImageError):
+            _splice_into_ramdisk_cpio(b"totally not cpio or lz4", b"extra")
+
+    def test_find_cpio_trailer_offset(self) -> None:
+        from bootimg import pack_cpio_newc, _find_cpio_trailer_offset
+        data = pack_cpio_newc([("x.txt", b"X")])
+        offset = _find_cpio_trailer_offset(data)
+        self.assertEqual(data[offset:offset + 6], b"070701")
+        self.assertIn(b"TRAILER!!!", data[offset:])
+
+    def test_looks_like_legacy_lz4(self) -> None:
+        from bootimg import _looks_like_legacy_lz4
+        self.assertTrue(_looks_like_legacy_lz4(b"\x02\x21\x4c\x18restofdata"))
+        self.assertFalse(_looks_like_legacy_lz4(b"070701headerdata"))
+        self.assertFalse(_looks_like_legacy_lz4(b""))
+
+
+import shutil as _shutil
+
+
+@unittest.skipUnless(_shutil.which("lz4"), "lz4 CLI tool not available")
+class SpliceIntoLz4RamdiskCpioTests(unittest.TestCase):
+    def test_splice_into_legacy_lz4_round_trips_via_lz4_tool(self) -> None:
+        import subprocess as _subprocess
+        from bootimg import pack_cpio_newc, _splice_into_ramdisk_cpio
+
+        existing_plain = pack_cpio_newc([("orig.txt", b"ORIGDATA")])
+        with tempfile.TemporaryDirectory() as raw:
+            plain_path = Path(raw) / "plain"
+            lz4_path = Path(raw) / "plain.lz4"
+            plain_path.write_bytes(existing_plain)
+            _subprocess.run(
+                ["lz4", "-l", "-f", str(plain_path), str(lz4_path)],
+                check=True, capture_output=True,
+            )
+            existing_lz4 = lz4_path.read_bytes()
+
+        extra = pack_cpio_newc([("extra.txt", b"EXTRADATA")])
+        result = _splice_into_ramdisk_cpio(existing_lz4, extra)
+
+        # result must itself be legacy-LZ4-compressed again
+        self.assertEqual(result[:4], b"\x02\x21\x4c\x18")
+
+        with tempfile.TemporaryDirectory() as raw:
+            result_lz4_path = Path(raw) / "result.lz4"
+            result_plain_path = Path(raw) / "result"
+            result_lz4_path.write_bytes(result)
+            _subprocess.run(
+                ["lz4", "-d", "-f", str(result_lz4_path), str(result_plain_path)],
+                check=True, capture_output=True,
+            )
+            decompressed = result_plain_path.read_bytes()
+
+        self.assertIn(b"orig.txt", decompressed)
+        self.assertIn(b"ORIGDATA", decompressed)
+        self.assertIn(b"extra.txt", decompressed)
+        self.assertIn(b"EXTRADATA", decompressed)
+        self.assertLess(decompressed.index(b"ORIGDATA"), decompressed.index(b"EXTRADATA"))
