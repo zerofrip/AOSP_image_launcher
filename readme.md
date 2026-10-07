@@ -34,6 +34,31 @@ service definitions (zygote, apexd, aconfigd, …). Additional partitions
 (`vendor.img`, `product.img`, `system_ext.img`, `userdata.img`) are
 auto-attached the same way when present in `PRODUCT_OUT`.
 
+How the injected fstab is actually found and used by `fs_mgr`/`init`
+(each point confirmed by reading the real AOSP `system/core/init` /
+`system/fs/fs_mgr` sources and by booting real artifacts):
+- Each virtio-blk drive is attached with an explicit, fixed PCI slot
+  (`-device virtio-blk-pci,addr=0x..`) instead of the implicit `-drive
+  if=virtio` shorthand, because `fs_mgr`/`init` only create a
+  `/dev/block/by-name/<partition>` symlink for an
+  `androidboot.partition_map` entry when the device's sysfs PCI path is
+  *also* listed in `androidboot.boot_devices` — an auto-assigned slot
+  would make that value unknowable in advance.
+- The synthetic fstab lines carry the `first_stage_mount` flag;
+  without it `fs_mgr`'s in-memory fstab ends up empty and first-stage
+  mount is silently skipped even once the file itself is found.
+- The fstab filename matches whatever `androidboot.hardware` actually
+  resolves to at runtime — bootconfig (if `vendor_boot.img` sets one)
+  takes priority over the launcher's own `-append` value, so the
+  effective hardware name is detected from `vendor_boot.img`'s
+  bootconfig blob rather than assumed.
+- Splicing the fstab into the ramdisk requires the external `lz4` CLI
+  tool on `PATH` when the generic ramdisk is LZ4-compressed (the common
+  case). Without it, this one enhancement is silently skipped (the
+  kernel still boots; first-stage mount may then fail the same way it
+  did before this fix) — everything else in this launcher remains
+  Python 3.11+, standard-library-only.
+
 ### Friendlier QEMU boot flow
 
 Real-world verification (building `qemu-system-x86_64` from source and booting
