@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import dataclasses
 import tempfile
 import unittest
 from pathlib import Path
 
 import support  # noqa: F401
-from support import make_cuttlefish_product, make_incomplete_ranchu, make_ranchu_product
+from support import (
+    make_cuttlefish_product,
+    make_generic_x86_64_product,
+    make_incomplete_ranchu,
+    make_ranchu_product,
+    write_vendor_boot,
+)
 
 from backends.android_emulator import AndroidEmulatorBackend
 from backends.qemu import QemuBackend
@@ -266,6 +273,109 @@ class QemuBackendTests(unittest.TestCase):
             self.assertNotIn("vendor_boot", blob)
             self.assertNotIn("super.img", blob)
             self.assertFalse(spec.bootable)
+
+
+class GenericQemuBackendTests(unittest.TestCase):
+    """Tests for the generic x86_64 QEMU boot path (product.family == 'unknown')."""
+
+    def _make_qemu_bin(self, tmpdir: str) -> Path:
+        p = Path(tmpdir) / "qemu-system-x86_64"
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        return p
+
+    def test_complete_generic_product_is_bootable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable)
+            self.assertIn("-kernel", spec.argv)
+            self.assertIn("-initrd", spec.argv)
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            self.assertTrue(any("system" in v for v in drive_values))
+            self.assertIn("-accel", spec.argv)
+            self.assertNotIn("vendor_boot", " ".join(spec.argv))
+            self.assertNotIn("super.img", " ".join(spec.argv))
+            self.assertEqual(spec.errors, [])
+
+    def test_missing_qemu_executable_not_bootable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=None), accel=_tcg(),
+            )
+            self.assertFalse(spec.bootable)
+            self.assertEqual(spec.argv, [])
+            self.assertTrue(any("qemu" in e.lower() or "executable" in e.lower() for e in spec.errors))
+
+    def test_missing_kernel_not_bootable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            # Override with nonexistent kernel path
+            spec = QemuBackend().plan(
+                dataclasses.replace(product, kernel=None),
+                LaunchOptions(backend="qemu", kernel=None),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertFalse(spec.bootable)
+            self.assertEqual(spec.argv, [])
+
+    def test_missing_system_not_bootable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                dataclasses.replace(product, system=None),
+                LaunchOptions(backend="qemu", system=None),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertFalse(spec.bootable)
+            self.assertEqual(spec.argv, [])
+
+    def test_vendor_boot_on_generic_family_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            vb = Path(raw) / "vendor_boot.img"
+            write_vendor_boot(vb)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu", vendor_boot=vb),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertFalse(spec.bootable)
+            self.assertEqual(spec.argv, [])
+            self.assertNotIn("vendor_boot", " ".join(spec.argv))
+
+    def test_super_img_on_generic_family_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                dataclasses.replace(product, dynamic_partitions=True),
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertFalse(spec.bootable)
+            self.assertEqual(spec.argv, [])
+
+    def test_extra_arg_without_allow_extra_args_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu", extra_args=["--foo"], allow_extra_args=False),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertFalse(spec.bootable)
+            self.assertTrue(any("--extra-arg requires --allow-extra-args" in e for e in spec.errors))
 
 
 class AutoBackendTests(unittest.TestCase):

@@ -182,6 +182,40 @@ def make_arm64_product(root: Path, name: str = "generic_arm64") -> Path:
     return product
 
 
+def make_generic_x86_64_product(
+    root: Path,
+    name: str = "generic_x86_64",
+    *,
+    with_vendor: bool = False,
+    with_userdata: bool = False,
+) -> Path:
+    """Synthetic generic x86_64 PRODUCT_OUT: no ranchu/goldfish, no Cuttlefish evidence.
+
+    Classified as ``unknown`` by ``inventory_product_out``. Contains a plain
+    ELF kernel, gzip ramdisk, and sparse system.img (magic bytes only, not bootable).
+    """
+    product = root / name
+    product.mkdir(parents=True, exist_ok=True)
+    write_elf(product / "kernel", "x86_64")
+    write_bytes(product / "ramdisk.img", b"\x1f\x8b" + b"\x00" * 8)  # gzip magic
+    write_sparse(product / "system.img")
+    if with_vendor:
+        write_sparse(product / "vendor.img")
+    if with_userdata:
+        write_bytes(product / "userdata.img", b"\x00" * 64)
+    write_text(
+        product / "build.prop",
+        "\n".join([
+            "ro.product.cpu.abi=x86_64",
+            "ro.product.cpu.abilist=x86_64,x86",
+            "ro.product.name=generic_x86_64",
+            "ro.product.model=AOSP on x86_64",
+            "",
+        ]),
+    )
+    return product
+
+
 def make_aosp_tree(root: Path, targets: list[str] | None = None) -> Path:
     """Create ``out/target/product/<target>`` under ``root``."""
 

@@ -16,7 +16,9 @@ Python 3.11+, standard library only. Commands are built as argv lists (`shell=Tr
 
 **Cuttlefish is unsupported in v1.** `vsoc_x86_64` is not an Android Emulator AVD and is not a plain `qemu-system-x86_64` disk boot. Use the Cuttlefish host tools (`launch_cvd`). This launcher will not rewrite `super.img` / `vendor_boot.img` into emulator disks.
 
-**QEMU backend is fail-closed.** ranchu needs goldfish devices the stock qemu binary does not provide. Missing kernel/initrd/cmdline evidence, dynamic partitions, and `super.img` also refuse. v1 typically reports `argv=[]` and `bootable=False`.
+**QEMU backend is fail-closed for `emulator_ranchu` and `cuttlefish`.** ranchu needs goldfish devices the stock qemu binary does not provide; Cuttlefish requires `launch_cvd`. Missing kernel/initrd/cmdline evidence, dynamic partitions, and `super.img` also refuse.
+
+**Generic x86_64 builds** (`product.family = "unknown"` — no `ro.hardware=ranchu/goldfish`, no Cuttlefish evidence): `qemu-system-x86_64` is now supported when `qemu-system-x86_64` is on PATH, architecture is `x86_64`, a kernel + ramdisk (or `boot.img` with `unpack_bootimg`) and `system.img` are available, and neither `vendor_boot` nor `super.img`/dynamic partitions are present. `vendor_boot` and `super.img` are still never attached as a regular disk on any family. The `emulator_ranchu` and `cuttlefish` families remain explicitly unsupported by this backend.
 
 `bootable=True` is reported only after compatibility checks pass.
 
