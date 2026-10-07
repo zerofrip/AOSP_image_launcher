@@ -17,6 +17,15 @@ from collections.abc import Callable
 from pathlib import Path
 
 from backends.base import Backend
+from bootimg import (
+    BootImageError,
+    build_combined_initrd,
+    build_partition_map_and_fstab,
+    detect_hardware_property,
+    pack_cpio_newc,
+    read_boot_image,
+    read_vendor_boot_image,
+)
 from capabilities import AccelSelection, Capabilities
 from image_inspector import inspect_file
 from models import ArtifactMapping, CommandSpec, LaunchOptions, ProductArtifacts
@@ -151,15 +160,18 @@ class QemuBackend(Backend):
             if product.super_image is not None:
                 ignored[str(product.super_image)] = "not an ordinary disk"
 
-        # ── vendor_boot refusal (all families) ──────────────────────────────
-        if product.vendor_boot is not None or options.vendor_boot is not None:
+        # ── vendor_boot refusal ─────────────────────────────────────────────
+        # options.vendor_boot (--vendor-boot CLI flag) is always refused
+        if options.vendor_boot is not None:
             errors.append("vendor_boot must not be passed as -initrd or -drive")
-            path = options.vendor_boot or product.vendor_boot
-            if path is not None:
-                ignored[str(path)] = "never -initrd or -drive"
+            ignored[str(options.vendor_boot)] = "never -initrd or -drive"
+        # product.vendor_boot is refused except for the unknown-family native-parse path
+        if product.vendor_boot is not None and product.family != "unknown":
+            errors.append("vendor_boot must not be passed as -initrd or -drive")
+            ignored[str(product.vendor_boot)] = "never -initrd or -drive"
 
-        # ── init_boot is always ignored ──────────────────────────────────────
-        if product.init_boot is not None:
+        # ── init_boot is ignored unless the unknown family consumes it ───────
+        if product.init_boot is not None and product.family != "unknown":
             ignored[str(product.init_boot)] = "init_boot is not used as QEMU initrd in v1"
 
         # ── extra_args gate (all families) ──────────────────────────────────
@@ -205,13 +217,111 @@ class QemuBackend(Backend):
             errors.append("qemu-system-x86_64 executable not found")
             return _fail(self, capabilities, errors, warnings, ignored, reasons)
 
+        # system image required (checked early: the drive list below,
+        # built from system + the optional images, is needed before kernel/
+        # ramdisk resolution so the native boot.img path can inject a
+        # matching androidboot.partition_map + fstab).
+        system = options.system or product.system
+        if system is None:
+            errors.append("missing system image: provide --system or a PRODUCT_OUT with system.img")
+            return _fail(self, capabilities, errors, warnings, ignored, reasons)
+
+        drives: list[tuple[str, Path]] = [("system", system)]
+        for role, src in [
+            ("vendor", options.vendor or product.vendor),
+            ("product", options.product_image or product.product),
+            ("system_ext", options.system_ext or product.system_ext),
+            ("data", options.userdata or product.userdata),
+        ]:
+            if src is not None:
+                drives.append((role, src))
+
         # kernel + ramdisk resolution
         kernel = options.kernel or product.kernel
         ramdisk = options.ramdisk or product.ramdisk
+        _boot_cmdline: str = ""
         _tmpdir: str | None = None
         if kernel is None or ramdisk is None:
             boot_img = product.boot
-            if boot_img is not None and capabilities.unpack_bootimg.available:
+            # ── Native boot.img parser (preferred, no external tools) ────────────
+            _native_tmpdir: str | None = None
+            if boot_img is not None:
+                try:
+                    boot_sec = read_boot_image(boot_img)
+                    init_sec = (
+                        read_boot_image(product.init_boot)
+                        if product.init_boot
+                        else None
+                    )
+                    vend_sec = (
+                        read_vendor_boot_image(product.vendor_boot)
+                        if product.vendor_boot
+                        else None
+                    )
+                    # ── by-name partition mapping + synthetic fstab ──────
+                    # This flat (no GPT, no super.img) per-partition disk
+                    # layout has no on-disk way for fs_mgr to discover
+                    # "/dev/block/by-name/<partition>" on its own, and the
+                    # vendor_boot ramdisk we just combined with typically
+                    # has no static /fstab.<hardware> file either (it
+                    # normally expects a device-tree-provided fstab that
+                    # only Cuttlefish's own crosvm/launch_cvd supplies).
+                    # androidboot.partition_map creates the by-name
+                    # symlinks from virtio-blk device name -> partition
+                    # name, and injecting our own /fstab.qemu gives
+                    # first-stage mount somewhere to find the resulting
+                    # mount table. androidboot.force_normal_boot=1 is also
+                    # required: many generic/GKI ramdisks bundle a combined
+                    # normal+recovery init and default to recovery mode
+                    # whenever /system/bin/recovery exists in that ramdisk.
+                    role_names = [role for role, _ in drives]
+                    hardware_name = detect_hardware_property(
+                        vend_sec, options.append or ""
+                    )
+                    partition_map, fstab_name, fstab_text = build_partition_map_and_fstab(
+                        role_names, hardware=hardware_name
+                    )
+                    # Some vendor ramdisks (e.g. GKI "first_stage_ramdisk" layout)
+                    # switch_root into a "/first_stage_ramdisk" subtree before
+                    # first-stage mount even looks for the fstab; place the
+                    # synthetic fstab at both the true root and inside that
+                    # subtree so it is found either way.
+                    fstab_bytes = fstab_text.encode("utf-8")
+                    fstab_cpio = pack_cpio_newc([
+                        (fstab_name, fstab_bytes),
+                        (f"first_stage_ramdisk/{fstab_name}", fstab_bytes),
+                        (f"system/etc/{fstab_name}", fstab_bytes),
+                        (f"first_stage_ramdisk/system/etc/{fstab_name}", fstab_bytes),
+                        (f"vendor/etc/{fstab_name}", fstab_bytes),
+                        (f"first_stage_ramdisk/vendor/etc/{fstab_name}", fstab_bytes),
+                    ])
+
+                    combined_bytes, boot_cmdline = build_combined_initrd(
+                        boot_sec, init_sec, vend_sec, extra_ramdisk=fstab_cpio
+                    )
+                    boot_cmdline = " ".join(
+                        s for s in [
+                            boot_cmdline,
+                            "androidboot.force_normal_boot=1",
+                            f"androidboot.partition_map={partition_map}",
+                        ] if s.strip()
+                    )
+
+                    _native_tmpdir = tempfile.mkdtemp()
+                    kernel_tmp = Path(_native_tmpdir) / "kernel"
+                    ramdisk_tmp = Path(_native_tmpdir) / "ramdisk"
+                    assert boot_sec.kernel is not None
+                    kernel_tmp.write_bytes(boot_sec.kernel)
+                    ramdisk_tmp.write_bytes(combined_bytes)
+                    kernel = kernel or kernel_tmp
+                    ramdisk = ramdisk or ramdisk_tmp
+                    _boot_cmdline = boot_cmdline
+                except Exception:
+                    pass
+            # ── Existing unpack_bootimg fallback (kept as last resort) ───────────
+            if (
+                kernel is None or ramdisk is None
+            ) and boot_img is not None and capabilities.unpack_bootimg.available:
                 _tmpdir = tempfile.mkdtemp()
                 try:
                     subprocess.run(
@@ -245,12 +355,6 @@ class QemuBackend(Backend):
             if errors:
                 return _fail(self, capabilities, errors, warnings, ignored, reasons)
 
-        # system image required
-        system = options.system or product.system
-        if system is None:
-            errors.append("missing system image: provide --system or a PRODUCT_OUT with system.img")
-            return _fail(self, capabilities, errors, warnings, ignored, reasons)
-
         # if we already have cross-family errors (vendor_boot/super.img/extra_args), bail
         if errors:
             return _fail(self, capabilities, errors, warnings, ignored, reasons)
@@ -281,31 +385,28 @@ class QemuBackend(Backend):
         # kernel + initrd + cmdline
         argv += ["-kernel", str(kernel)]
         argv += ["-initrd", str(ramdisk)]
-        cmdline = "console=ttyS0 androidboot.hardware=qemu"
+        cmdline_base = "console=ttyS0 androidboot.hardware=qemu"
+        parts = [s for s in [_boot_cmdline, cmdline_base] if s.strip()]
+        cmdline = " ".join(parts)
         if options.append:
             cmdline += " " + options.append
         argv += ["-append", cmdline]
 
-        # system drive
-        sys_fmt = _qemu_format(system)
-        sys_drive = f"file={system},format={sys_fmt},if=virtio"
-        if not options.writable_system:
-            sys_drive += ",readonly=on"
-        argv += ["-drive", sys_drive]
-        roles = {"system": str(system)}
-
-        # optional drives: vendor, product, system_ext, userdata
-        for role, src in [
-            ("vendor", options.vendor or product.vendor),
-            ("product", options.product_image or product.product),
-            ("system_ext", options.system_ext or product.system_ext),
-            ("data", options.userdata or product.userdata),
-        ]:
-            if src is not None:
-                fmt = _qemu_format(src)
-                drv = f"file={src},format={fmt},if=virtio,readonly=on"
-                argv += ["-drive", drv]
-                roles[role] = str(src)
+        # drives: the precomputed `drives` list (system first, then any of
+        # vendor/product/system_ext/data that are present) — same order the
+        # native boot.img path used to build androidboot.partition_map, so
+        # the virtio-blk device naming (vda, vdb, ...) the guest kernel
+        # assigns actually matches what we told it.
+        roles: dict[str, str] = {}
+        for role, src in drives:
+            fmt = _qemu_format(src)
+            drv = f"file={src},format={fmt},if=virtio"
+            if role == "system" and options.writable_system:
+                pass
+            else:
+                drv += ",readonly=on"
+            argv += ["-drive", drv]
+            roles[role] = str(src)
 
         # networking: prefer user-mode slirp + hostfwd for ADB, but this
         # qemu binary may have been built without libslirp (-netdev user is

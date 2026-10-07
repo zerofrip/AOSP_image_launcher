@@ -104,6 +104,85 @@ def write_vendor_boot(path: Path) -> Path:
     return write_bytes(path, VENDOR_BOOT_MAGIC + b"\x00" * 16)
 
 
+def _round_up(n: int, align: int) -> int:
+    return ((n + align - 1) // align) * align
+
+
+def _make_boot_img_v4(*, kernel_data: bytes, ramdisk_data: bytes) -> bytes:
+    """Synthetic boot.img / init_boot.img in Android v4 header format."""
+
+    header_len = 1584
+    header = bytearray(header_len)
+    header[0:8] = BOOT_MAGIC
+    struct.pack_into("<I", header, 8, len(kernel_data))
+    struct.pack_into("<I", header, 12, len(ramdisk_data))
+    struct.pack_into("<I", header, 40, 4)
+    struct.pack_into("<I", header, 1580, 0)  # signature_size
+
+    page_size = 4096
+    data = bytes(header)
+    data += b"\x00" * (page_size - len(data))
+    data += kernel_data
+    data += b"\x00" * (_round_up(len(data), page_size) - len(data))
+    data += ramdisk_data
+    return data
+
+
+def _make_vendor_boot_img_v4(*, ramdisk_data: bytes, bootconfig_data: bytes) -> bytes:
+    """Synthetic vendor_boot.img in Android v4 header format."""
+
+    header_len = 2128
+    header = bytearray(header_len)
+    header[0:8] = VENDOR_BOOT_MAGIC
+    page_size = 4096
+    struct.pack_into("<I", header, 8, 4)
+    struct.pack_into("<I", header, 12, page_size)
+    struct.pack_into("<I", header, 24, len(ramdisk_data))
+    struct.pack_into("<I", header, 2100, 0)  # dtb_size
+    struct.pack_into("<I", header, 2112, 0)  # vrt_size
+    struct.pack_into("<I", header, 2124, len(bootconfig_data))
+
+    data = bytes(header)
+    data += b"\x00" * (page_size - len(data))
+    data += ramdisk_data
+    data += b"\x00" * (_round_up(len(data), page_size) - len(data))
+    data += bootconfig_data
+    return data
+
+
+def make_boot_img_product(root: Path, name: str = "boot_img_x86_64") -> Path:
+    """Synthetic generic x86_64 PRODUCT_OUT that only has boot*.img images.
+
+    No standalone kernel or ramdisk.img; the QEMU backend must parse the
+    boot image files natively to produce a bootable command line.
+    """
+
+    product = root / name
+    product.mkdir(parents=True, exist_ok=True)
+    write_bytes(
+        product / "boot.img",
+        _make_boot_img_v4(kernel_data=b"\x00" * 4096, ramdisk_data=b""),
+    )
+    write_bytes(
+        product / "init_boot.img",
+        _make_boot_img_v4(kernel_data=b"", ramdisk_data=b"\x00" * 512),
+    )
+    write_bytes(
+        product / "vendor_boot.img",
+        _make_vendor_boot_img_v4(
+            ramdisk_data=b"\x00" * 256, bootconfig_data=b"\x00" * 32
+        ),
+    )
+    write_sparse(product / "system.img")
+    write_sparse(product / "vendor.img")
+    write_bytes(product / "userdata.img", b"\x00" * 64)
+    write_text(
+        product / "build.prop",
+        "ro.product.cpu.abi=x86_64\nro.product.name=boot_img_x86_64\n",
+    )
+    return product
+
+
 def make_ranchu_product(root: Path, name: str = "emu64x") -> Path:
     """Synthetic ranchu/goldfish PRODUCT_OUT (magic bytes only, not bootable)."""
 

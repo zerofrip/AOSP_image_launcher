@@ -10,6 +10,7 @@ from pathlib import Path
 
 import support  # noqa: F401
 from support import (
+    make_boot_img_product,
     make_cuttlefish_product,
     make_generic_x86_64_product,
     make_incomplete_ranchu,
@@ -520,6 +521,31 @@ class GenericQemuBackendTests(unittest.TestCase):
                 )
             self.assertTrue(spec.bootable)
             self.assertNotIn("-L", spec.argv)
+
+
+    def test_boot_img_native_parse_produces_bootable_result(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_boot_img_product(Path(raw))
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            # -kernel must point at a tempfile, not inside product_dir
+            kernel_idx = spec.argv.index("-kernel") + 1
+            self.assertNotIn(str(product_dir), spec.argv[kernel_idx])
+            # -initrd must point at a tempfile, not inside product_dir
+            initrd_idx = spec.argv.index("-initrd") + 1
+            self.assertNotIn(str(product_dir), spec.argv[initrd_idx])
+            # the raw vendor_boot / init_boot paths must NOT appear in argv
+            if product.vendor_boot:
+                self.assertNotIn(str(product.vendor_boot), " ".join(spec.argv))
+            if product.init_boot:
+                self.assertNotIn(str(product.init_boot), " ".join(spec.argv))
 
 
 class AutoBackendTests(unittest.TestCase):
