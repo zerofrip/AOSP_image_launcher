@@ -226,15 +226,11 @@ def _plan_for_backend(
             bootable=False,
             reasons=errors,
         )
+    # For unknown/generic families, delegate to QEMU and return its result as-is.
+    # The qemu backend is authoritative — if it can boot, bootable=True; if not, fail-closed.
     qemu_spec = qemu.plan(
         product, options, capabilities, accel=accel, help_text=help_text, port_in_use=port_in_use
     )
-    qemu_spec.errors = [
-        f"auto backend: family {product.family!r} is not emulator_ranchu",
-        *qemu_spec.errors,
-    ]
-    qemu_spec.bootable = False
-    qemu_spec.argv = []
     return qemu_spec
 
 
