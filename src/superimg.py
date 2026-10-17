@@ -5,6 +5,12 @@ potentially multi-gigabyte sparse or raw super image and exposes the
 logical partition table.  Partition contents can then be extracted on
 demand without loading the whole image into memory.
 
+This implementation only supports single-super-block-device images, which
+is the overwhelmingly common case for emulator/Cuttlefish/QEMU-style
+builds.  Multi-block-device super.img layouts are parsed successfully, but
+extracting a partition whose extents live on a non-primary block device
+will raise ``SuperImageError`` instead of silently reading the wrong bytes.
+
 Reference: AOSP ``system/core/fs_mgr/liblp`` — ``LpMetadataGeometry``,
 ``LpMetadataHeader``, ``LpMetadataPartition``, ``LpMetadataExtent`` and
 ``LpMetadataBlockDevice``.
@@ -116,6 +122,12 @@ class SuperMetadata:
     def minor_version(self) -> int:
         """Backwards-compatible alias for ``header_version[1]``."""
         return self.header_version[1]
+
+    @property
+    def block_device_count(self) -> int:
+        """Number of physical block devices declared in the metadata."""
+        devices = getattr(self, "_block_devices", None)
+        return len(devices) if devices is not None else 0
 
 
 def available_slot_suffixes(metadata: SuperMetadata) -> list[str]:
@@ -490,9 +502,16 @@ def extract_partition(
                         f"{extent.target_type}"
                     )
                 # ``target_source`` identifies which block device the extent lives
-                # on; validate it exists even though this single-super-device
-                # implementation only supports device index 0.
+                # on.  This implementation only supports the primary block device
+                # (index 0); fail clearly for any other device rather than read
+                # bytes from the wrong file/location.
                 _get_block_device(metadata, extent.target_source)
+                if extent.target_source != 0:
+                    raise SuperImageError(
+                        f"partition {partition.name!r} extent {i} lives on block "
+                        f"device {extent.target_source}, but this implementation "
+                        f"only supports the primary block device (index 0)"
+                    )
                 # ``target_data`` already is the absolute sector number on the
                 # target block device (confirmed against a real built super.img);
                 # it must NOT be added to the device's first_logical_sector.

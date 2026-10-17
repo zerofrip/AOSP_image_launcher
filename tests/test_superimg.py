@@ -72,17 +72,21 @@ def _build_super_image_raw(
     metadata_slot_count: int = 2,
     logical_block_size: int = 4096,
     corrupt_primary_geometry: bool = False,
+    num_block_devices: int = 1,
+    target_sources: dict[str, int] | None = None,
 ) -> bytes:
     """Construct a spec-correct liblp super image from scratch.
 
     ``payload_map`` maps partition names (including any slot suffix) to
     their raw payload bytes.  Each partition gets one linear extent.
+
+    ``target_sources`` optionally overrides the block-device index for a
+    named partition's extent; partitions not present default to device 0.
     """
 
     num_partitions = len(payload_map)
     num_extents = num_partitions
     num_groups = 0
-    num_block_devices = 1
 
     part_table_size = num_partitions * struct.calcsize(_T_PART_FMT)
     ext_table_size = num_extents * struct.calcsize(_T_EXTENT_FMT)
@@ -165,16 +169,28 @@ def _build_super_image_raw(
         )
 
     # Extent table.
-    for i, (_name, _payload, _rel_sector, num_sectors, absolute_sector) in enumerate(extent_infos):
+    target_sources = target_sources or {}
+    for i, (name, _payload, _rel_sector, num_sectors, absolute_sector) in enumerate(extent_infos):
         offset = tables_start + ext_td_off + i * struct.calcsize(_T_EXTENT_FMT)
         struct.pack_into(
             _T_EXTENT_FMT,
             image,
             offset,
             num_sectors,
-            0,                  # target_type = LINEAR
-            absolute_sector,    # target_data = absolute file sector
-            0,                  # target_source = block device 0
+            0,                            # target_type = LINEAR
+            absolute_sector,              # target_data = absolute file sector
+            target_sources.get(name, 0),  # target_source = block device index
+        )
+
+    # Block device table.
+    for i in range(num_block_devices):
+        offset = tables_start + bd_td_off + i * _BD_ENTRY_SIZE
+        struct.pack_into(
+            _T_BD_FMT,
+            image,
+            offset,
+            0 if i == 0 else 0xFFFFFFFF,  # first_logical_sector
+            0,                            # alignment
         )
 
     # Payloads.
@@ -484,6 +500,50 @@ class TestSparseHandling(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(SuperImageError, "sparse.*simg2img"):
                     read_super_metadata(sparse_path)
+
+
+class TestBlockDeviceHandling(unittest.TestCase):
+    def test_single_block_device_behavior_unchanged(self) -> None:
+        """A single-block-device image must parse and extract exactly as before."""
+        payload = b"SINGLE" + b"\x00" * (LP_SECTOR_SIZE - 6)
+        data = _build_super_image_raw({"system_a": payload})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _write(tmpdir, "super.img", data)
+            metadata = read_super_metadata(path)
+            self.assertEqual(metadata.block_device_count, 1)
+            self.assertEqual(extract_partition(path, metadata, "system", "_a"), payload)
+
+    def test_multi_block_device_all_extents_on_zero_extracts(self) -> None:
+        """Metadata with multiple block devices still extracts partitions whose
+        extents all live on the primary (index 0) block device."""
+        payload = b"PRIMARY" + b"\x00" * (LP_SECTOR_SIZE - 7)
+        data = _build_super_image_raw(
+            {"system_a": payload},
+            num_block_devices=2,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _write(tmpdir, "super.img", data)
+            metadata = read_super_metadata(path)
+            self.assertEqual(metadata.block_device_count, 2)
+            self.assertEqual(extract_partition(path, metadata, "system", "_a"), payload)
+
+    def test_multi_block_device_non_zero_source_raises(self) -> None:
+        """A partition whose extent references block device 1 must raise a clear
+        SuperImageError instead of silently reading from the wrong location."""
+        payload = b"SECONDARY" + b"\x00" * (LP_SECTOR_SIZE - 9)
+        data = _build_super_image_raw(
+            {"system_a": payload},
+            num_block_devices=2,
+            target_sources={"system_a": 1},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _write(tmpdir, "super.img", data)
+            metadata = read_super_metadata(path)
+            self.assertEqual(metadata.block_device_count, 2)
+            with self.assertRaisesRegex(
+                SuperImageError, "block device 1.*only supports the primary block device"
+            ):
+                extract_partition(path, metadata, "system", "_a")
 
 
 if __name__ == "__main__":
