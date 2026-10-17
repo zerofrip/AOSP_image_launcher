@@ -16,9 +16,11 @@ Python 3.11+, standard library only. Commands are built as argv lists (`shell=Tr
 
 **Cuttlefish is unsupported in v1.** `vsoc_x86_64` is not an Android Emulator AVD and is not a plain `qemu-system-x86_64` disk boot. Use the Cuttlefish host tools (`launch_cvd`). This launcher will not rewrite `super.img` / `vendor_boot.img` into emulator disks.
 
-**QEMU backend is fail-closed for `emulator_ranchu` and `cuttlefish`.** ranchu needs goldfish devices the stock qemu binary does not provide; Cuttlefish requires `launch_cvd`. Missing kernel/initrd/cmdline evidence, dynamic partitions, and `super.img` also refuse.
+**QEMU backend is fail-closed for `emulator_ranchu` and `cuttlefish`.** ranchu needs goldfish devices the stock qemu binary does not provide; Cuttlefish requires `launch_cvd`. Missing kernel/initrd/cmdline evidence also refuses. `super.img` / dynamic partitions still refuse outright for `emulator_ranchu` and `cuttlefish`; the unknown family instead tries native extraction (see below).
 
-**Generic x86_64 builds** (`product.family = "unknown"` — no `ro.hardware=ranchu/goldfish`, no Cuttlefish evidence): `qemu-system-x86_64` is now supported when `qemu-system-x86_64` is on PATH, architecture is `x86_64`, a kernel + ramdisk (or `boot.img`/`init_boot.img`/`vendor_boot.img` parsed natively — no external `unpack_bootimg` required) and `system.img` are available, and neither `vendor_boot` nor `super.img`/dynamic partitions are present. `vendor_boot` and `super.img` are still never attached as a regular disk on any family. The `emulator_ranchu` and `cuttlefish` families remain explicitly unsupported by this backend.
+**Generic x86_64 builds** (`product.family = "unknown"` — no `ro.hardware=ranchu/goldfish`, no Cuttlefish evidence): `qemu-system-x86_64` is now supported when `qemu-system-x86_64` is on PATH, architecture is `x86_64`, a kernel + ramdisk (or `boot.img`/`init_boot.img`/`vendor_boot.img` parsed natively — no external `unpack_bootimg` required) and a `system` image are available (either a standalone `system.img`, or extracted from `super.img`; see below), and `vendor_boot` is not present. `vendor_boot` is still never attached as a regular disk, and `super.img` / dynamic partitions are never attached as a regular disk either — they are only ever read via the native liblp parser below. The `emulator_ranchu` and `cuttlefish` families remain explicitly unsupported by this backend.
+
+**Treble / dynamic-partitions `super.img` support (unknown family only):** when `PRODUCT_OUT` has no standalone `system.img`/`vendor.img` but does have a `super.img`, the launcher parses its liblp metadata natively (`src/superimg.py`, stdlib-only, no `lpunpack`/`simg2img` subprocess) and extracts the `system`/`vendor` logical partitions for the requested slot into a temporary directory, then boots from those exactly as if they had been standalone images. Slot selection: `--slot a` picks partition names ending in `_a`; without `--slot`, the first slot found in the metadata is used, or no suffix for a non-A/B image. Only the simple, fresh-flash extent layout is supported — post-OTA Virtual A/B snapshot/COW states are out of scope. Failure to parse `super.img` or to extract either partition only emits a warning and falls back to any standalone image that is present; it never crashes the plan.
 
 This path has been verified to boot real Android userspace end to end:
 given just `boot.img` + `init_boot.img` + `vendor_boot.img` + `system.img`
@@ -136,7 +138,7 @@ KVM requires `/dev/kvm` present and accessible on Linux/WSL.
 ## Images this launcher will not misuse
 
 - **`vendor_boot.img` / `init_boot.img`**: never passed as `-initrd` or as a regular `-drive`.
-- **`super.img` / dynamic partitions**: never attached as an ordinary disk. Diagnose them; do not `simg2img` / `lpunpack` automatically.
+- **`super.img` / dynamic partitions**: never attached as an ordinary disk. For `emulator_ranchu` and `cuttlefish` this is a hard refusal. For the unknown family, `system`/`vendor` are extracted from it via a native, stdlib-only liblp parser (`src/superimg.py`) — no `simg2img` or `lpunpack` subprocess is ever invoked.
 - **AVB / `vbmeta*.img`**: inventoried as optional metadata. v1 does not disable or strip verification.
 - `--extra-arg` is ignored unless `--allow-extra-args` is set (otherwise a validation error).
 
@@ -166,6 +168,7 @@ python3 src/launcher.py --product-out PATH --diagnose
 python3 src/launcher.py --product-out PATH --dry-run
 python3 src/launcher.py --list-product-outs /path/to/aosp
 python3 src/launcher.py --product-out PATH --headless   # launch only if bootable
+python3 src/launcher.py --product-out PATH --slot a --headless  # pick an A/B slot from super.img
 python3 src/launcher.py --gui
 ```
 
@@ -469,7 +472,8 @@ CI (`.github/workflows/ci.yml`) runs compile + unittest on Ubuntu and Windows, P
 | `--accel whpx` on WSL | Linux ELF qemu/emulator cannot use WHPX |
 | `--extra-arg` error | Pass `--allow-extra-args` |
 | ADB | Goldfish uses `-ports`, not slirp `hostfwd` |
-| Want to unpack `vendor_boot` / `super` | Out of scope for v1; do not attach them as disks |
+| Want to unpack `vendor_boot` | Out of scope for v1; never attached as a disk |
+| `super.img` extraction failed / wrong slot | Check `--diagnose` warnings; pass `--slot <letter>` explicitly; only simple fresh-flash extent layouts are supported, not post-OTA Virtual A/B snapshots |
 
 ## Lineage
 

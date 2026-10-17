@@ -109,6 +109,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--product", type=Path, dest="product_image", help="Override product.img")
     parser.add_argument("--userdata", type=Path, help="Override userdata.img source")
     parser.add_argument(
+        "--slot",
+        help=(
+            "A/B slot letter (e.g. 'a') to extract system/vendor from when "
+            "PRODUCT_OUT uses dynamic partitions (super.img); default: the "
+            "first slot found in super.img's metadata, or none for a non-A/B image"
+        ),
+    )
+    parser.add_argument(
         "--memory",
         type=parse_memory_mb,
         default=4096,
@@ -161,6 +169,7 @@ def options_from_args(args: argparse.Namespace) -> LaunchOptions:
         vendor=args.vendor,
         product_image=args.product_image,
         userdata=args.userdata,
+        slot=args.slot,
         memory_mb=int(args.memory),
         cpus=cpus,
         adb_port=int(args.adb_port),

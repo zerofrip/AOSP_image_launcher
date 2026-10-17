@@ -368,7 +368,11 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertEqual(spec.argv, [])
             self.assertNotIn("vendor_boot", " ".join(spec.argv))
 
-    def test_super_img_on_generic_family_refused(self) -> None:
+    def test_dynamic_partitions_flag_alone_does_not_block_standalone_images(self) -> None:
+        """The dynamic_partitions warning flag by itself (no super.img file,
+        e.g. from a use_dynamic_partitions=true build property) must not
+        refuse a product that otherwise has ordinary standalone
+        system.img/vendor.img files to boot from."""
         with tempfile.TemporaryDirectory() as raw:
             product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
             qemu_bin = self._make_qemu_bin(raw)
@@ -377,8 +381,73 @@ class GenericQemuBackendTests(unittest.TestCase):
                 LaunchOptions(backend="qemu"),
                 _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
             )
+            self.assertTrue(spec.bootable)
+
+    def test_super_img_on_cuttlefish_still_refused(self) -> None:
+        """cuttlefish/emulator_ranchu must keep being refused outright when
+        an actual super.img is present; only the unknown family attempts
+        native liblp extraction."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_cuttlefish_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            super_path = Path(raw) / product.target_name / "super.img"
+            super_path.parent.mkdir(parents=True, exist_ok=True)
+            super_path.write_bytes(b"\x00" * 4096)
+            spec = QemuBackend().plan(
+                dataclasses.replace(product, dynamic_partitions=True, super_image=super_path),
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
             self.assertFalse(spec.bootable)
             self.assertEqual(spec.argv, [])
+            self.assertTrue(
+                any("cannot be attached as an ordinary QEMU disk" in e for e in spec.errors)
+            )
+
+    def test_super_img_only_extracts_system_and_vendor(self) -> None:
+        """A product with a real liblp super.img and no standalone
+        system.img/vendor.img must boot by extracting system/vendor from
+        the super.img via the native liblp parser."""
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_superimg import _build_super_image_raw
+
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw))
+            (product_dir / "system.img").unlink()
+            super_data = _build_super_image_raw(
+                {"system_a": b"s" * 4096, "vendor_a": b"v" * 4096}
+            )
+            (product_dir / "super.img").write_bytes(super_data)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"), _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable)
+            self.assertTrue(
+                any("extracted \'system_a\'" in w for w in spec.warnings)
+            )
+            self.assertTrue(
+                any("extracted \'vendor_a\'" in w for w in spec.warnings)
+            )
+
+    def test_unparseable_super_img_without_standalone_images_fails_closed(self) -> None:
+        """A super.img that cannot be parsed, combined with no standalone
+        system.img, must fail closed rather than crash or silently boot
+        from garbage data."""
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw))
+            (product_dir / "system.img").unlink()
+            (product_dir / "super.img").write_bytes(b"\x00" * 4096)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"), _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertFalse(spec.bootable)
+            self.assertTrue(any("missing system image" in e for e in spec.errors))
 
     def test_extra_arg_without_allow_extra_args_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -151,6 +151,7 @@ class LaunchOptions:
     vendor: Path | None = None
     product_image: Path | None = None
     userdata: Path | None = None
+    slot: str | None = None  # A/B slot letter (e.g. "a"), for dynamic-partitions (super.img) extraction
     memory_mb: int = 4096
     cpus: int = 4
     adb_port: int = 5555
