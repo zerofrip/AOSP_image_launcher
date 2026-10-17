@@ -14,6 +14,7 @@ VendorBoot,BootV3}.kt and doc/layout.md section 5 "boot in memory").
 
 from __future__ import annotations
 
+import gzip
 import re
 import struct
 import subprocess
@@ -333,27 +334,30 @@ def _splice_into_ramdisk_cpio(existing_ramdisk: bytes, extra_ramdisk: bytes) -> 
     images.
 
     Raises BootImageError if ``existing_ramdisk``'s compression can't be
-    recognized/round-tripped (currently: legacy-LZ4 or plain cpio only;
+    recognized/round-tripped (currently: legacy-LZ4, gzip, or plain cpio;
     LZ4 round-trip additionally requires the external ``lz4`` CLI tool).
     Callers should treat that as "best-effort enhancement unavailable"
     and fall back to not injecting ``extra_ramdisk``, not as fatal.
     """
     if _looks_like_legacy_lz4(existing_ramdisk):
         plain = _lz4_decompress(existing_ramdisk)
-        recompress = True
+        compressor = _lz4_compress_legacy
+    elif existing_ramdisk[:2] == b"\x1f\x8b":
+        plain = gzip.decompress(existing_ramdisk)
+        compressor = gzip.compress
     elif existing_ramdisk[:6] == b"070701":
         plain = existing_ramdisk
-        recompress = False
+        compressor = None
     else:
         raise BootImageError(
-            "ramdisk is neither legacy-LZ4 nor plain cpio; cannot splice into it"
+            "ramdisk is neither legacy-LZ4, gzip, nor plain cpio; cannot splice into it"
         )
 
     trailer_off = _find_cpio_trailer_offset(plain)
     spliced_plain = plain[:trailer_off] + extra_ramdisk
 
-    if recompress:
-        return _lz4_compress_legacy(spliced_plain)
+    if compressor is not None:
+        return compressor(spliced_plain)
     return spliced_plain
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import struct
 import tempfile
 import unittest
@@ -488,6 +489,33 @@ class SpliceIntoRamdiskCpioTests(unittest.TestCase):
         # result must still be a single, valid, extractable cpio stream
         # (ends with exactly one TRAILER!!!, not two)
         self.assertEqual(result.count(b"TRAILER!!!"), 1)
+
+    def test_splice_into_gzip_round_trips_via_gzip(self) -> None:
+        from bootimg import pack_cpio_newc, _splice_into_ramdisk_cpio
+        existing_plain = pack_cpio_newc([("orig.txt", b"ORIGDATA")])
+        existing_gzip = gzip.compress(existing_plain)
+        extra = pack_cpio_newc([("extra.txt", b"EXTRADATA")])
+        result = _splice_into_ramdisk_cpio(existing_gzip, extra)
+        # result must itself be gzip-compressed again
+        self.assertEqual(result[:2], b"\x1f\x8b")
+        decompressed = gzip.decompress(result)
+        self.assertIn(b"orig.txt", decompressed)
+        self.assertIn(b"ORIGDATA", decompressed)
+        self.assertIn(b"extra.txt", decompressed)
+        self.assertIn(b"EXTRADATA", decompressed)
+        self.assertLess(
+            decompressed.index(b"ORIGDATA"), decompressed.index(b"EXTRADATA")
+        )
+        self.assertEqual(decompressed.count(b"TRAILER!!!"), 1)
+
+    def test_splice_error_message_mentions_supported_formats(self) -> None:
+        from bootimg import _splice_into_ramdisk_cpio
+        with self.assertRaises(BootImageError) as ctx:
+            _splice_into_ramdisk_cpio(b"totally not cpio, gzip, or lz4", b"extra")
+        msg = str(ctx.exception)
+        self.assertIn("legacy-LZ4", msg)
+        self.assertIn("gzip", msg)
+        self.assertIn("plain cpio", msg)
 
     def test_splice_raises_on_unrecognized_format(self) -> None:
         from bootimg import _splice_into_ramdisk_cpio
