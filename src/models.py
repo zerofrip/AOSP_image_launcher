@@ -151,6 +151,7 @@ class LaunchOptions:
     vendor: Path | None = None
     product_image: Path | None = None
     userdata: Path | None = None
+    aosp_root: Path | None = None  # override AOSP source root for virtio module injection
     slot: str | None = None  # A/B slot letter (e.g. "a"), for dynamic-partitions (super.img) extraction
     memory_mb: int = 4096
     cpus: int = 4

@@ -19,9 +19,11 @@ from pathlib import Path
 from backends.base import Backend
 from bootimg import (
     BootImageError,
+    _read_kernel_version,
     build_combined_initrd,
     build_partition_map_and_fstab,
     build_pci_boot_devices,
+    build_virtio_modules_ramdisk,
     detect_hardware_property,
     pack_cpio_newc,
     read_boot_image,
@@ -48,6 +50,28 @@ _STANDARD_FIRMWARE_DIRS = (
     Path("/usr/share/qemu"),
     Path("/usr/local/share/qemu"),
 )
+
+
+def _find_aosp_root(product_out: Path | None) -> Path | None:
+    """Derive the AOSP source root from a PRODUCT_OUT path.
+
+    PRODUCT_OUT is always ``<AOSP_ROOT>/out/target/product/<target>`` in a
+    standard AOSP tree, so walking up until ``build/envsetup.sh`` is found
+    gives a reliable root without requiring an explicit ``--aosp-root`` flag.
+    Returns ``None`` when the path is not inside a recognizable AOSP tree.
+    """
+
+    if product_out is None:
+        return None
+    current = Path(product_out)
+    for _ in range(8):
+        if (current / "build" / "envsetup.sh").is_file():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
 
 
 def _detect_firmware_dir(qemu_path: Path | None) -> Path | None:
@@ -363,8 +387,28 @@ class QemuBackend(Backend):
                         (f"first_stage_ramdisk/vendor/etc/{fstab_name}", fstab_bytes),
                     ])
 
+                    # GKI-style kernels often ship virtio-blk/PCI as loadable
+                    # modules. If we can locate the matching AOSP prebuilt
+                    # module tree, splice those modules into the generic
+                    # ramdisk so first-stage init can load them before it
+                    # tries to mount by-name partitions.
+                    extra_ramdisk = fstab_cpio
+                    if boot_sec.kernel:
+                        kernel_version = _read_kernel_version(boot_sec.kernel)
+                        aosp_root = options.aosp_root or _find_aosp_root(product.product_out)
+                        if kernel_version and aosp_root:
+                            modules_ramdisk, mod_warning = build_virtio_modules_ramdisk(
+                                aosp_root,
+                                kernel_version,
+                                architecture=product.architecture or "x86_64",
+                            )
+                            if mod_warning:
+                                warnings.append(mod_warning)
+                            if modules_ramdisk:
+                                extra_ramdisk = extra_ramdisk + modules_ramdisk
+
                     combined_bytes, boot_cmdline = build_combined_initrd(
-                        boot_sec, init_sec, vend_sec, extra_ramdisk=fstab_cpio
+                        boot_sec, init_sec, vend_sec, extra_ramdisk=extra_ramdisk
                     )
                     boot_cmdline = " ".join(
                         s for s in [

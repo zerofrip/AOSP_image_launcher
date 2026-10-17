@@ -549,3 +549,148 @@ class SpliceIntoLz4RamdiskCpioTests(unittest.TestCase):
         self.assertIn(b"extra.txt", decompressed)
         self.assertIn(b"EXTRADATA", decompressed)
         self.assertLess(decompressed.index(b"ORIGDATA"), decompressed.index(b"EXTRADATA"))
+
+
+class ReadKernelVersionTests(unittest.TestCase):
+    def test_extracts_version_from_banner(self) -> None:
+        from bootimg import _read_kernel_version
+
+        kernel = (
+            b"prefix Linux version 5.10.160-android12-9-00001-g1234567890-ab "
+            b"(builder@host) #1\x00suffix"
+        )
+        self.assertEqual(
+            _read_kernel_version(kernel),
+            "5.10.160-android12-9-00001-g1234567890-ab",
+        )
+
+    def test_returns_none_when_banner_missing(self) -> None:
+        from bootimg import _read_kernel_version
+
+        self.assertIsNone(_read_kernel_version(b"no version banner here"))
+
+
+class BuildVirtioModulesRamdiskTests(unittest.TestCase):
+    def _make_module_tree(
+        self,
+        tmpdir: str,
+        version: str,
+        *,
+        missing_ko: set[str] | None = None,
+        missing_meta: set[str] | None = None,
+    ) -> Path:
+        missing_ko = missing_ko or set()
+        missing_meta = missing_meta or set()
+        root = Path(tmpdir) / "aosp"
+        mod_dir = (
+            root
+            / "kernel"
+            / "prebuilts"
+            / "5.10"
+            / "x86_64"
+            / "system_dlkm_staging"
+            / "lib"
+            / "modules"
+            / version
+        )
+        mod_dir.mkdir(parents=True)
+
+        modules = {
+            "virtio_pci_legacy_dev.ko": ("kernel/drivers/virtio", b"MOD_LEGACY"),
+            "virtio_pci_modern_dev.ko": ("kernel/drivers/virtio", b"MOD_MODERN"),
+            "virtio_pci.ko": ("kernel/drivers/virtio", b"MOD_PCI"),
+            "virtio_blk.ko": ("kernel/drivers/block", b"MOD_BLK"),
+        }
+        for name, (rel, content) in modules.items():
+            if name in missing_ko:
+                continue
+            (mod_dir / rel).mkdir(parents=True, exist_ok=True)
+            (mod_dir / rel / name).write_bytes(content)
+
+        dep_text = (
+            "kernel/drivers/virtio/virtio_pci_legacy_dev.ko:\n"
+            "kernel/drivers/virtio/virtio_pci_modern_dev.ko:\n"
+            "kernel/drivers/virtio/virtio_pci.ko: "
+            "kernel/drivers/virtio/virtio_pci_legacy_dev.ko "
+            "kernel/drivers/virtio/virtio_pci_modern_dev.ko\n"
+            "kernel/drivers/block/virtio_blk.ko: kernel/drivers/virtio/virtio_pci.ko\n"
+        )
+        meta = {
+            "modules.dep": dep_text,
+            "modules.alias": "alias data\n",
+            "modules.softdep": "softdep data\n",
+        }
+        for name, content in meta.items():
+            if name not in missing_meta:
+                (mod_dir / name).write_text(content, encoding="utf-8")
+        return root
+
+    def test_all_modules_present_builds_cpio_with_ordered_modules_load(self) -> None:
+        from bootimg import build_virtio_modules_ramdisk
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = self._make_module_tree(raw, "5.10.160-android12")
+            cpio, warning = build_virtio_modules_ramdisk(
+                aosp_root, "5.10.160-android12", architecture="x86_64"
+            )
+            self.assertIsNone(warning)
+            self.assertTrue(cpio.startswith(b"070701"))
+            self.assertIn(
+                b"lib/modules/5.10.160-android12/kernel/drivers/virtio/virtio_pci_legacy_dev.ko",
+                cpio,
+            )
+            self.assertIn(
+                b"lib/modules/5.10.160-android12/kernel/drivers/virtio/virtio_pci_modern_dev.ko",
+                cpio,
+            )
+            self.assertIn(
+                b"lib/modules/5.10.160-android12/kernel/drivers/virtio/virtio_pci.ko",
+                cpio,
+            )
+            self.assertIn(
+                b"lib/modules/5.10.160-android12/kernel/drivers/block/virtio_blk.ko",
+                cpio,
+            )
+            self.assertIn(b"MOD_LEGACY", cpio)
+            self.assertIn(b"MOD_MODERN", cpio)
+            self.assertIn(b"MOD_PCI", cpio)
+            self.assertIn(b"MOD_BLK", cpio)
+            self.assertIn(b"modules.dep", cpio)
+            self.assertIn(b"modules.alias", cpio)
+            self.assertIn(b"modules.softdep", cpio)
+            expected_load = (
+                "kernel/drivers/virtio/virtio_pci_legacy_dev.ko\n"
+                "kernel/drivers/virtio/virtio_pci_modern_dev.ko\n"
+                "kernel/drivers/virtio/virtio_pci.ko\n"
+                "kernel/drivers/block/virtio_blk.ko\n"
+            ).encode("utf-8")
+            self.assertIn(expected_load, cpio)
+
+    def test_missing_module_directory_noops_with_warning(self) -> None:
+        from bootimg import build_virtio_modules_ramdisk
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = Path(raw) / "aosp"
+            aosp_root.mkdir()
+            cpio, warning = build_virtio_modules_ramdisk(
+                aosp_root, "5.10.0", architecture="x86_64"
+            )
+            self.assertEqual(cpio, b"")
+            self.assertIsNotNone(warning)
+            self.assertIn("no virtio module directory", warning)
+
+    def test_partial_module_set_noops_with_warning(self) -> None:
+        from bootimg import build_virtio_modules_ramdisk
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = self._make_module_tree(
+                raw, "5.10.160-android12", missing_ko={"virtio_pci.ko", "virtio_blk.ko"}
+            )
+            cpio, warning = build_virtio_modules_ramdisk(
+                aosp_root, "5.10.160-android12", architecture="x86_64"
+            )
+            self.assertEqual(cpio, b"")
+            self.assertIsNotNone(warning)
+            self.assertIn("incomplete", warning.lower())
+            self.assertIn("virtio_pci.ko", warning)
+            self.assertIn("virtio_blk.ko", warning)

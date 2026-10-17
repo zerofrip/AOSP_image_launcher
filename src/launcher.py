@@ -109,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--product", type=Path, dest="product_image", help="Override product.img")
     parser.add_argument("--userdata", type=Path, help="Override userdata.img source")
     parser.add_argument(
+        "--aosp-root",
+        type=Path,
+        help="Override AOSP source root used to find virtio kernel modules for QEMU generic boot",
+    )
+    parser.add_argument(
         "--slot",
         help=(
             "A/B slot letter (e.g. 'a') to extract system/vendor from when "
@@ -169,6 +174,7 @@ def options_from_args(args: argparse.Namespace) -> LaunchOptions:
         vendor=args.vendor,
         product_image=args.product_image,
         userdata=args.userdata,
+        aosp_root=args.aosp_root,
         slot=args.slot,
         memory_mb=int(args.memory),
         cpus=cpus,

@@ -10,11 +10,16 @@ from pathlib import Path
 
 import support  # noqa: F401
 from support import (
+    _make_boot_img_v4,
+    _make_vendor_boot_img_v4,
     make_boot_img_product,
     make_cuttlefish_product,
     make_generic_x86_64_product,
     make_incomplete_ranchu,
     make_ranchu_product,
+    write_bytes,
+    write_sparse,
+    write_text,
     write_vendor_boot,
 )
 
@@ -288,6 +293,71 @@ class QemuBackendTests(unittest.TestCase):
             self.assertNotIn("vendor_boot", blob)
             self.assertNotIn("super.img", blob)
             self.assertFalse(spec.bootable)
+
+
+def _make_aosp_virtio_module_tree(root: Path, version: str) -> Path:
+    """Create a fake AOSP ``system_dlkm_staging`` tree with the 4 virtio modules."""
+
+    mod_dir = (
+        root
+        / "kernel"
+        / "prebuilts"
+        / "5.10"
+        / "x86_64"
+        / "system_dlkm_staging"
+        / "lib"
+        / "modules"
+        / version
+    )
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "kernel" / "drivers" / "virtio").mkdir(parents=True)
+    (mod_dir / "kernel" / "drivers" / "block").mkdir(parents=True)
+    (mod_dir / "kernel" / "drivers" / "virtio" / "virtio_pci_legacy_dev.ko").write_bytes(b"MOD_LEGACY")
+    (mod_dir / "kernel" / "drivers" / "virtio" / "virtio_pci_modern_dev.ko").write_bytes(b"MOD_MODERN")
+    (mod_dir / "kernel" / "drivers" / "virtio" / "virtio_pci.ko").write_bytes(b"MOD_PCI")
+    (mod_dir / "kernel" / "drivers" / "block" / "virtio_blk.ko").write_bytes(b"MOD_BLK")
+    (mod_dir / "modules.dep").write_text(
+        "kernel/drivers/virtio/virtio_pci_legacy_dev.ko:\n"
+        "kernel/drivers/virtio/virtio_pci_modern_dev.ko:\n"
+        "kernel/drivers/virtio/virtio_pci.ko: "
+        "kernel/drivers/virtio/virtio_pci_legacy_dev.ko "
+        "kernel/drivers/virtio/virtio_pci_modern_dev.ko\n"
+        "kernel/drivers/block/virtio_blk.ko: kernel/drivers/virtio/virtio_pci.ko\n"
+    )
+    (mod_dir / "modules.alias").write_text("alias virtio_pci virtio_pci\n")
+    (mod_dir / "modules.softdep").write_text("softdep data\n")
+    return root
+
+
+def _make_boot_img_product_with_kernel_version(root: Path, version: str) -> Path:
+    """Like ``support.make_boot_img_product`` but with a real kernel banner and a cpio init_boot ramdisk."""
+
+    from bootimg import pack_cpio_newc
+
+    product = root / "boot_img_x86_64"
+    product.mkdir(parents=True, exist_ok=True)
+    kernel_data = f"Linux version {version}\x00".encode("utf-8")
+    generic_cpio = pack_cpio_newc([("placeholder", b"GENERIC")])
+    write_bytes(
+        product / "boot.img",
+        _make_boot_img_v4(kernel_data=kernel_data, ramdisk_data=b""),
+    )
+    write_bytes(
+        product / "init_boot.img",
+        _make_boot_img_v4(kernel_data=b"", ramdisk_data=generic_cpio),
+    )
+    write_bytes(
+        product / "vendor_boot.img",
+        _make_vendor_boot_img_v4(ramdisk_data=b"\x00" * 256, bootconfig_data=b"\x00" * 32),
+    )
+    write_sparse(product / "system.img")
+    write_sparse(product / "vendor.img")
+    write_bytes(product / "userdata.img", b"\x00" * 64)
+    write_text(
+        product / "build.prop",
+        "ro.product.cpu.abi=x86_64\nro.product.name=boot_img_x86_64\n",
+    )
+    return product
 
 
 class GenericQemuBackendTests(unittest.TestCase):
@@ -615,6 +685,31 @@ class GenericQemuBackendTests(unittest.TestCase):
                 self.assertNotIn(str(product.vendor_boot), " ".join(spec.argv))
             if product.init_boot:
                 self.assertNotIn(str(product.init_boot), " ".join(spec.argv))
+
+    def test_boot_img_native_parse_injects_virtio_modules_when_aosp_root_known(self) -> None:
+        """When --aosp-root points at a tree with matching virtio modules,
+        the combined initrd must contain them spliced into the generic
+        ramdisk."""
+
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            product = inventory_product_out(product_dir)
+            aosp_root = _make_aosp_virtio_module_tree(Path(raw) / "aosp", version)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu", aosp_root=aosp_root),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            initrd_path = Path(spec.argv[spec.argv.index("-initrd") + 1])
+            initrd = initrd_path.read_bytes()
+            self.assertIn(b"MOD_LEGACY", initrd)
+            self.assertIn(b"MOD_PCI", initrd)
+            self.assertIn(b"MOD_BLK", initrd)
+            self.assertIn(b"lib/modules/5.10.160-android12/modules.load", initrd)
 
 
 class AutoBackendTests(unittest.TestCase):

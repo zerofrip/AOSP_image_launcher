@@ -426,6 +426,181 @@ def build_combined_initrd(
     return combined, combined_cmdline
 
 
+def _read_kernel_version(kernel: bytes) -> str | None:
+    """Extract the kernel release string (e.g. ``5.10.160-android12``)
+    from the uncompressed ``Linux version ...`` banner embedded in a kernel
+    image.
+
+    This is used to match the kernel against the AOSP prebuilt module
+    directory name under ``kernel/prebuilts/<ver>/<arch>/system_dlkm_staging/
+    lib/modules/<kernel-version>/``. The banner is null-terminated and
+    typically appears in the x86 setup header, so a simple substring search
+    is sufficient and robust across bzImage/vmlinux layouts.
+    """
+
+    marker = b"Linux version "
+    idx = kernel.find(marker)
+    if idx < 0:
+        return None
+    start = idx + len(marker)
+    end = kernel.find(b"\x00", start)
+    if end < 0:
+        end = len(kernel)
+    banner = kernel[start:end].decode("utf-8", errors="replace")
+    version = banner.split(" ", 1)[0].strip()
+    return version if version else None
+
+
+_VIRTIO_MODULE_NAMES = (
+    "virtio_pci_legacy_dev.ko",
+    "virtio_pci_modern_dev.ko",
+    "virtio_pci.ko",
+    "virtio_blk.ko",
+)
+
+
+def _parse_modules_dep(text: str) -> dict[str, list[str]]:
+    r"""Parse a ``modules.dep`` file into {module_path: [dependency_path, ...]}.
+
+    The format is ``<module>: <dep> <dep> ...`` with optional ``\`` line
+    continuations. Only relative module paths are expected (the format AOSP's
+    depmod generates).
+    """
+
+    lines: list[str] = []
+    current = ""
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if line.endswith("\\"):
+            current += line[:-1]
+            continue
+        current += line
+        lines.append(current)
+        current = ""
+    if current:
+        lines.append(current)
+
+    deps: dict[str, list[str]] = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        module, rest = line.split(":", 1)
+        module = module.strip()
+        dep_str = rest.strip()
+        deps[module] = dep_str.split() if dep_str else []
+    return deps
+
+
+def _order_modules_by_deps(targets: list[str], deps: dict[str, list[str]]) -> list[str] | None:
+    """Return ``targets`` in dependency-first order using the given
+    ``modules.dep`` map. Dependencies that are not themselves in ``targets``
+    are ignored (they are not being injected). Returns ``None`` on cycle.
+    """
+
+    target_set = set(targets)
+    ordered: list[str] = []
+    visited: set[str] = set()
+    temp: set[str] = set()
+
+    def visit(path: str) -> bool:
+        if path in temp:
+            return False
+        if path in visited:
+            return True
+        temp.add(path)
+        for dep in deps.get(path, []):
+            if dep in target_set and not visit(dep):
+                return False
+        temp.remove(path)
+        visited.add(path)
+        ordered.append(path)
+        return True
+
+    for path in targets:
+        if path not in visited and not visit(path):
+            return None
+    return ordered
+
+
+def build_virtio_modules_ramdisk(
+    aosp_root: Path,
+    kernel_version: str,
+    architecture: str = "x86_64",
+) -> tuple[bytes, str | None]:
+    """Build an extra initrd cpio containing the virtio-blk/PCI modules.
+
+    Given an AOSP source root and a kernel release string, locate the
+    matching ``system_dlkm_staging`` module directory and, if it contains
+    the four required virtio modules plus ``modules.dep``/``modules.alias``/
+    ``modules.softdep``, return a plain cpio archive that can be spliced
+    into the generic ramdisk. The archive contains:
+
+    * the four ``.ko`` files at their real relative paths,
+    * ``modules.dep``, ``modules.alias``, ``modules.softdep`` copied as-is,
+    * a generated ``modules.load`` listing the four modules in dependency
+      order (parsed from ``modules.dep``).
+
+    If the directory or any required file/module is missing, returns
+    ``(b"", warning)`` so the caller can log the warning and continue
+    without blocking boot. A partial module set is treated as a failure:
+    injecting an incomplete, guaranteed-to-fail set is worse than skipping.
+    """
+
+    if not kernel_version:
+        return b"", "kernel version is empty; cannot locate virtio modules"
+
+    aosp = Path(aosp_root)
+    prebuilts = aosp / "kernel" / "prebuilts"
+    glob_pattern = f"*/{architecture}/system_dlkm_staging/lib/modules/{kernel_version}"
+    candidates = sorted(prebuilts.glob(glob_pattern))
+    if not candidates:
+        return (
+            b"",
+            f"no virtio module directory found for kernel {kernel_version!r} under {prebuilts}",
+        )
+    mod_dir = candidates[0]
+
+    meta_files = ("modules.dep", "modules.alias", "modules.softdep")
+    for name in meta_files:
+        if not (mod_dir / name).is_file():
+            return b"", f"module metadata {name!r} missing in {mod_dir}"
+
+    found: dict[str, Path] = {}
+    for path in mod_dir.rglob("*.ko"):
+        if path.name in _VIRTIO_MODULE_NAMES:
+            found[path.name] = path
+    missing = sorted(set(_VIRTIO_MODULE_NAMES) - set(found.keys()))
+    if missing:
+        return b"", f"incomplete virtio module set; missing {missing} in {mod_dir}"
+
+    rel_paths = {name: str(path.relative_to(mod_dir)) for name, path in found.items()}
+
+    try:
+        dep_text = (mod_dir / "modules.dep").read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return b"", f"cannot read modules.dep: {exc}"
+    deps = _parse_modules_dep(dep_text)
+
+    target_paths = [rel_paths[name] for name in _VIRTIO_MODULE_NAMES]
+    ordered = _order_modules_by_deps(target_paths, deps)
+    if ordered is None:
+        return b"", f"could not determine virtio module dependency order in {mod_dir}"
+
+    entries: list[tuple[str, bytes]] = []
+    for name in _VIRTIO_MODULE_NAMES:
+        rel = rel_paths[name]
+        entries.append((f"lib/modules/{kernel_version}/{rel}", found[name].read_bytes()))
+    for name in meta_files:
+        entries.append((f"lib/modules/{kernel_version}/{name}", (mod_dir / name).read_bytes()))
+    load_content = "\n".join(ordered) + "\n"
+    entries.append((f"lib/modules/{kernel_version}/modules.load", load_content.encode("utf-8")))
+
+    return pack_cpio_newc(entries), None
+
+
 def pack_cpio_newc(entries: list[tuple[str, bytes]]) -> bytes:
     """Build a minimal, uncompressed SVR4 "newc" ASCII cpio archive.
 
