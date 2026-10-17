@@ -569,6 +569,21 @@ class ReadKernelVersionTests(unittest.TestCase):
 
         self.assertIsNone(_read_kernel_version(b"no version banner here"))
 
+    def test_extracts_version_from_bzimage_setup_header(self) -> None:
+        from bootimg import _read_kernel_version
+
+        version = "5.10.160-android12-9-00001-g1234567890-ab"
+        tail = f"{version} (builder@host) #1 SMP\x00".encode("utf-8")
+        kernel = bytearray(support.bzimage_header())
+        kernel.extend(tail)
+        struct.pack_into("<H", kernel, 0x20E, len(support.bzimage_header()) - 0x200)
+        self.assertEqual(_read_kernel_version(bytes(kernel)), version)
+
+    def test_returns_none_when_setup_header_field_is_zero(self) -> None:
+        from bootimg import _read_kernel_version
+
+        self.assertIsNone(_read_kernel_version(support.bzimage_header()))
+
 
 class BuildVirtioModulesRamdiskTests(unittest.TestCase):
     def _make_module_tree(

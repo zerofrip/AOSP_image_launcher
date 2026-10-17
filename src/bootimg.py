@@ -426,17 +426,33 @@ def build_combined_initrd(
     return combined, combined_cmdline
 
 
-def _read_kernel_version(kernel: bytes) -> str | None:
-    """Extract the kernel release string (e.g. ``5.10.160-android12``)
-    from the uncompressed ``Linux version ...`` banner embedded in a kernel
-    image.
+def _read_kernel_version_from_setup_header(kernel: bytes) -> str | None:
+    """Extract the kernel release string from the x86 boot protocol header.
 
-    This is used to match the kernel against the AOSP prebuilt module
-    directory name under ``kernel/prebuilts/<ver>/<arch>/system_dlkm_staging/
-    lib/modules/<kernel-version>/``. The banner is null-terminated and
-    typically appears in the x86 setup header, so a simple substring search
-    is sufficient and robust across bzImage/vmlinux layouts.
+    The field at offset ``0x20E`` is a little-endian pointer (in bytes) to the
+    version string, relative to offset ``0x200`` into the kernel image. The
+    string is space-terminated and typically looks like
+    ``5.10.160-android12-9-00001-g1234567890-ab (builder@host) ...``.
     """
+
+    if len(kernel) < 0x210:
+        return None
+    value = struct.unpack_from("<H", kernel, 0x20E)[0]
+    if value == 0:
+        return None
+    offset = value + 0x200
+    if offset >= len(kernel):
+        return None
+    end = kernel.find(b"\x00", offset)
+    if end < 0:
+        end = len(kernel)
+    banner = kernel[offset:end].decode("utf-8", errors="replace")
+    version = banner.split(" ", 1)[0].strip()
+    return version if version else None
+
+
+def _read_kernel_version_from_banner(kernel: bytes) -> str | None:
+    """Fallback: extract the kernel release string from a ``Linux version`` banner."""
 
     marker = b"Linux version "
     idx = kernel.find(marker)
@@ -449,6 +465,17 @@ def _read_kernel_version(kernel: bytes) -> str | None:
     banner = kernel[start:end].decode("utf-8", errors="replace")
     version = banner.split(" ", 1)[0].strip()
     return version if version else None
+
+
+def _read_kernel_version(kernel: bytes) -> str | None:
+    """Extract the kernel release string from a kernel image.
+
+    Tries the x86 boot protocol header pointer first (the canonical location
+    for bzImage kernels), then falls back to a plain ``Linux version`` banner
+    search for vmlinux or unusual layouts.
+    """
+
+    return _read_kernel_version_from_setup_header(kernel) or _read_kernel_version_from_banner(kernel)
 
 
 _VIRTIO_MODULE_NAMES = (
