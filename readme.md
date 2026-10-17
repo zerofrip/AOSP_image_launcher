@@ -11,16 +11,16 @@ Python 3.11+, standard library only. Commands are built as argv lists (`shell=Tr
 | Family | Detection | This launcher |
 | --- | --- | --- |
 | `emulator_ranchu` | `kernel-ranchu` / `kernel-ranchu-64`, `advancedFeatures.ini`, `ro.hardware=ranchu`/`goldfish`, `emu64x`, `sdk_phone*` | Android Emulator only, and only when kernel + ramdisk + `system.img` are present |
-| `cuttlefish` | `vsoc_*`, `aosp_cf_*`, board `cutf`, `super.img` + `vendor_boot.img` | **Unsupported.** Diagnose and recommend `launch_cvd`. Do not convert images |
+| `cuttlefish` | `vsoc_*`, `aosp_cf_*`, board `cutf`, `super.img` + `vendor_boot.img` | QEMU backend via native boot.img/vendor_boot.img/super.img parsing (same path as `unknown`). First-stage boot and all Treble dynamic partitions verified; `/data` mount (virtual-A/B SnapshotManager) is a known gap. `launch_cvd` remains the full-featured path. |
 | unknown / conflicting | mixed or missing evidence | Refused (`bootable=False`) |
 
-**Cuttlefish is unsupported in v1.** `vsoc_x86_64` is not an Android Emulator AVD and is not a plain `qemu-system-x86_64` disk boot. Use the Cuttlefish host tools (`launch_cvd`). This launcher will not rewrite `super.img` / `vendor_boot.img` into emulator disks.
+**Cuttlefish is now supported by the QEMU backend in v1.** It uses the same native parsing path as generic `unknown` builds: `boot.img`/`init_boot.img`/`vendor_boot.img` are parsed natively, a synthetic `/fstab.<hardware>` plus `androidboot.partition_map`/`androidboot.boot_devices` is injected, dynamic partitions are extracted from `super.img` via the stdlib-only liblp parser, and first-stage init mounts `system`, `vendor`, `product`, `system_ext`, `odm`, `vendor_dlkm`, and `odm_dlkm`. Graphics, vsock, and other crosvm/`launch_cvd`-specific services are not emulated. `/data`/`userdata` mount currently fails with a virtual-A/B SnapshotManager error and reboots cleanly there; use `launch_cvd` for a fully working userspace.
 
-**QEMU backend is fail-closed for `emulator_ranchu` and `cuttlefish`.** ranchu needs goldfish devices the stock qemu binary does not provide; Cuttlefish requires `launch_cvd`. Missing kernel/initrd/cmdline evidence also refuses. `super.img` / dynamic partitions still refuse outright for `emulator_ranchu` and `cuttlefish`; the unknown family instead tries native extraction (see below).
+**QEMU backend is fail-closed for `emulator_ranchu` only.** ranchu needs goldfish devices the stock qemu binary does not provide. `cuttlefish` now uses the same native-parsing path as `unknown`. Missing kernel/initrd/cmdline evidence also refuses. `super.img` / dynamic partitions still refuse outright for `emulator_ranchu`; for `unknown` and `cuttlefish` they are extracted natively (see below).
 
-**Generic x86_64 builds** (`product.family = "unknown"` — no `ro.hardware=ranchu/goldfish`, no Cuttlefish evidence): `qemu-system-x86_64` is now supported when `qemu-system-x86_64` is on PATH, architecture is `x86_64`, a kernel + ramdisk (or `boot.img`/`init_boot.img`/`vendor_boot.img` parsed natively — no external `unpack_bootimg` required) and a `system` image are available (either a standalone `system.img`, or extracted from `super.img`; see below), and `vendor_boot` is not present. `vendor_boot` is still never attached as a regular disk, and `super.img` / dynamic partitions are never attached as a regular disk either — they are only ever read via the native liblp parser below. The `emulator_ranchu` and `cuttlefish` families remain explicitly unsupported by this backend.
+**Generic x86_64 builds** (`product.family = "unknown"` — no `ro.hardware=ranchu/goldfish`, no Cuttlefish evidence): `qemu-system-x86_64` is now supported when `qemu-system-x86_64` is on PATH, architecture is `x86_64`, a kernel + ramdisk (or `boot.img`/`init_boot.img`/`vendor_boot.img` parsed natively — no external `unpack_bootimg` required) and a `system` image are available (either a standalone `system.img`, or extracted from `super.img`; see below), and `vendor_boot` is not present. `vendor_boot` is still never attached as a regular disk, and `super.img` / dynamic partitions are never attached as a regular disk either — they are only ever read via the native liblp parser below. The `emulator_ranchu` family remains explicitly unsupported by this backend; `cuttlefish` is now supported via the native-parsing path described below.
 
-**Treble / dynamic-partitions `super.img` support (unknown family only):** when `PRODUCT_OUT` has no standalone `system.img`/`vendor.img` but does have a `super.img`, the launcher parses its liblp metadata natively (`src/superimg.py`, stdlib-only, no `lpunpack`/`simg2img` subprocess) and extracts the `system`/`vendor` logical partitions for the requested slot into a temporary directory, then boots from those exactly as if they had been standalone images. Slot selection: `--slot a` picks partition names ending in `_a`; without `--slot`, the first slot found in the metadata is used, or no suffix for a non-A/B image. Only the simple, fresh-flash extent layout is supported — post-OTA Virtual A/B snapshot/COW states are out of scope. Failure to parse `super.img` or to extract either partition only emits a warning and falls back to any standalone image that is present; it never crashes the plan.
+**Treble / dynamic-partitions `super.img` support (unknown and cuttlefish families):** when `PRODUCT_OUT` has no standalone `system.img`/`vendor.img` but does have a `super.img`, the launcher parses its liblp metadata natively (`src/superimg.py`, stdlib-only, no `lpunpack`/`simg2img` subprocess) and extracts the `system`/`vendor`/`product`/`system_ext`/`odm`/`vendor_dlkm`/`odm_dlkm` logical partitions for the requested slot into a temporary directory, then boots from those exactly as if they had been standalone images. Slot selection: `--slot a` picks partition names ending in `_a`; without `--slot`, the first slot found in the metadata is used, or no suffix for a non-A/B image. Only the simple, fresh-flash extent layout is supported — post-OTA Virtual A/B snapshot/COW states are out of scope. Failure to parse `super.img` or to extract a partition only emits a warning and falls back to any standalone image that is present; it never crashes the plan.
 
 This path has been verified to boot real Android userspace end to end:
 given just `boot.img` + `init_boot.img` + `vendor_boot.img` + `system.img`
@@ -97,9 +97,12 @@ host-specific next steps instead of a generic "go install something" message:
 - not found → points at the [android-cuttlefish](https://github.com/google/android-cuttlefish)
   host packages to install.
 
-Cuttlefish itself remains unsupported by the Android Emulator and
-`qemu-system-x86_64` backends in this launcher — these are diagnostics only,
-not a new execution path.
+With `--backend auto` (the default), Cuttlefish guidance still points at
+`launch_cvd` because the auto path does not select a boot backend for this
+family. With `--backend qemu`, Cuttlefish is now booted via the native-parsing
+path described above; the `launch_cvd` diagnostics remain useful when you need
+the full crosvm-based Cuttlefish environment (graphics, vsock, working `/data`,
+etc.).
 
 `bootable=True` is reported only after compatibility checks pass.
 
@@ -138,7 +141,7 @@ KVM requires `/dev/kvm` present and accessible on Linux/WSL.
 ## Images this launcher will not misuse
 
 - **`vendor_boot.img` / `init_boot.img`**: never passed as `-initrd` or as a regular `-drive`.
-- **`super.img` / dynamic partitions**: never attached as an ordinary disk. For `emulator_ranchu` and `cuttlefish` this is a hard refusal. For the unknown family, `system`/`vendor` are extracted from it via a native, stdlib-only liblp parser (`src/superimg.py`) — no `simg2img` or `lpunpack` subprocess is ever invoked.
+- **`super.img` / dynamic partitions**: never attached as an ordinary disk. For `emulator_ranchu` this is a hard refusal. For the `unknown` and `cuttlefish` families, `system`/`vendor`/`product`/`system_ext`/`odm`/`vendor_dlkm`/`odm_dlkm` are extracted from it via a native, stdlib-only liblp parser (`src/superimg.py`) — no `simg2img` or `lpunpack` subprocess is ever invoked.
 - **AVB / `vbmeta*.img`**: inventoried as optional metadata. v1 does not disable or strip verification.
 - `--extra-arg` is ignored unless `--allow-extra-args` is set (otherwise a validation error).
 
@@ -194,7 +197,7 @@ make build-aosp AOSP_ROOT=/path/to/android-latest-release
 
 The build uses a fixed Bash script with the lunch target and build targets passed as positional arguments; it does not concatenate user values into shell source. `PRODUCT_OUT` must resolve below `<AOSP_ROOT>/out/target/product`. `--build-target` may be repeated when a narrower AOSP target is intentionally required; the default `droid` build is the supported path.
 
-Do not build `vsoc_x86_64` for this backend. It is a Cuttlefish product and remains a `launch_cvd` workflow even though it produces files named `system.img`, `boot.img`, and `super.img`.
+Do not build `vsoc_x86_64` for the Android Emulator backend. The QEMU backend now supports Cuttlefish first-stage boot via the native parsing path above, but `/data` mounting remains a known gap; use `launch_cvd` for a fully functional Cuttlefish device (graphics, vsock, etc.).
 
 Defaults: `--backend auto`, `--memory 4096` (legacy `4G` is accepted), `--cpus min(4, host)`, `--adb-port 5555`, `--accel auto`.
 
@@ -467,7 +470,7 @@ CI (`.github/workflows/ci.yml`) runs compile + unittest on Ubuntu and Windows, P
 | --- | --- |
 | `AmbiguousProductOutError` | Several `out/target/product/*` dirs; pass `--product-out` or `--target` |
 | `guest architecture is not x86_64` | This tree is x86_64-only |
-| Cuttlefish `bootable=False` | Expected. Use `launch_cvd` |
+| Cuttlefish `bootable=False` | With `--backend auto` this still recommends `launch_cvd`. With `--backend qemu`, check that `qemu-system-x86_64` is on PATH and that `system.img` or a parseable `super.img` is present; `/data` mount is a known gap. Use `launch_cvd` for full functionality. |
 | ranchu `emulator not found` | Put `emulator` on `PATH`, set `ANDROID_SDK_ROOT`, or use an AOSP tree with `prebuilts/android-emulator/` |
 | `--accel whpx` on WSL | Linux ELF qemu/emulator cannot use WHPX |
 | `--extra-arg` error | Pass `--allow-extra-args` |

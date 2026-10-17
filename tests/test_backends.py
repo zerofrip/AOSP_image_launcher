@@ -260,7 +260,7 @@ class EmulatorBackendTests(unittest.TestCase):
 
 
 class QemuBackendTests(unittest.TestCase):
-    def test_fail_closed_cuttlefish(self) -> None:
+    def test_cuttlefish_no_longer_family_refused(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             product = inventory_product_out(make_cuttlefish_product(Path(raw)))
             spec = QemuBackend().plan(
@@ -269,10 +269,10 @@ class QemuBackendTests(unittest.TestCase):
             self.assertEqual(spec.argv, [])
             self.assertFalse(spec.bootable)
             joined = " ".join(spec.errors).lower()
-            self.assertIn("launch_cvd", joined)
-            self.assertNotIn("-initrd", spec.argv)
-            self.assertTrue(any("vendor_boot" in err for err in spec.errors))
-            self.assertTrue(any("super.img" in err.lower() or "dynamic" in err.lower() for err in spec.errors))
+            self.assertNotIn("launch_cvd", joined)
+            self.assertNotIn("vendor_boot", joined)
+            self.assertNotIn("cannot be attached as an ordinary qemu disk", joined)
+            self.assertTrue(any("qemu" in e.lower() for e in spec.errors))
 
     def test_fail_closed_ranchu(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -294,6 +294,40 @@ class QemuBackendTests(unittest.TestCase):
             self.assertNotIn("vendor_boot", blob)
             self.assertNotIn("super.img", blob)
             self.assertFalse(spec.bootable)
+
+    def test_cuttlefish_with_complete_evidence_is_bootable(self) -> None:
+        """A cuttlefish-family product with the same evidence as a bootable
+        unknown product is now routed through the same native-parsing path."""
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_boot_img_product(Path(raw), "cuttlefish_x86_64")
+            product = inventory_product_out(product_dir)
+            product.family = "cuttlefish"
+            qemu_bin = Path(raw) / "qemu-system-x86_64"
+            qemu_bin.write_text("#!/bin/sh\n")
+            qemu_bin.chmod(0o755)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            self.assertIn("-kernel", spec.argv)
+            self.assertIn("-initrd", spec.argv)
+            self.assertNotIn("vendor_boot", " ".join(spec.argv))
+
+    def test_emulator_ranchu_still_refused(self) -> None:
+        """ranchu/goldfish must keep being refused by the QEMU backend."""
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_ranchu_product(Path(raw)))
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"), _caps(emulator=None), accel=_tcg()
+            )
+            self.assertEqual(spec.argv, [])
+            self.assertFalse(spec.bootable)
+            joined = " ".join(spec.errors).lower()
+            self.assertTrue(any("goldfish" in err.lower() or "ranchu" in err.lower() for err in spec.errors))
+            self.assertTrue(any("missing complete kernel/initrd/cmdline evidence" in e for e in spec.errors))
 
 
 def _make_aosp_virtio_module_tree(root: Path, version: str) -> Path:
@@ -454,10 +488,11 @@ class GenericQemuBackendTests(unittest.TestCase):
             )
             self.assertTrue(spec.bootable)
 
-    def test_super_img_on_cuttlefish_still_refused(self) -> None:
-        """cuttlefish/emulator_ranchu must keep being refused outright when
-        an actual super.img is present; only the unknown family attempts
-        native liblp extraction."""
+    def test_super_img_on_cuttlefish_attempts_native_extraction(self) -> None:
+        """cuttlefish now attempts native liblp extraction from super.img;
+        when extraction fails and no standalone system.img is present, the
+        plan fails closed with a missing-system error rather than a family
+        refusal."""
         with tempfile.TemporaryDirectory() as raw:
             product = inventory_product_out(make_cuttlefish_product(Path(raw)))
             qemu_bin = self._make_qemu_bin(raw)
@@ -472,6 +507,9 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertFalse(spec.bootable)
             self.assertEqual(spec.argv, [])
             self.assertTrue(
+                any("missing system image" in e for e in spec.errors)
+            )
+            self.assertFalse(
                 any("cannot be attached as an ordinary QEMU disk" in e for e in spec.errors)
             )
 

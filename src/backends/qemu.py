@@ -1,9 +1,14 @@
 """QEMU backend for v1.
 
-QEMU is not used to boot Cuttlefish or ranchu/goldfish. For the generic
-``unknown`` x86_64 family, qemu-system-x86_64 is used when a kernel, initrd,
-and system.img are available and no unsupported images (vendor_boot, super.img,
-dynamic partitions) are present.
+For the generic ``unknown`` x86_64 family and for ``cuttlefish``,
+qemu-system-x86_64 is used when a kernel, initrd, and system.img are available
+and no unsupported images (vendor_boot passed as a disk, super.img as an
+ordinary disk) are present.
+
+Cuttlefish uses the same native boot.img/vendor_boot.img/init_boot.img/super.img
+parsing path as ``unknown``; it does not use crosvm/launch_cvd or any
+Cuttlefish-specific devices. ranchu/goldfish remains refused because it needs
+goldfish pipe/sync/battery devices the stock qemu binary does not provide.
 
 vendor_boot is never -initrd/-drive; super.img is never an ordinary disk.
 """
@@ -173,25 +178,20 @@ class QemuBackend(Backend):
         ignored: dict[str, str] = {}
 
         # ── unchanged fail-closed blocks ────────────────────────────────────
-        if product.family == "cuttlefish":
-            errors.append(
-                "Cuttlefish (vsoc_x86_64) is not supported by qemu-system-x86_64; use launch_cvd"
-            )
-        elif product.family == "emulator_ranchu":
+        if product.family == "emulator_ranchu":
             errors.append(
                 "ranchu/goldfish requires Android Emulator goldfish pipe/sync/battery devices; "
                 "plain qemu-system-x86_64 is unsupported"
             )
 
-        # ── super.img / dynamic_partitions refusal (cuttlefish/ranchu only) ─
-        # The unknown family attempts native liblp extraction of system/
-        # vendor from super.img below instead of being refused outright;
-        # cuttlefish/emulator_ranchu never reach that extraction path and
-        # keep being refused exactly as before.
+        # ── super.img / dynamic_partitions refusal (ranchu only) ────────────
+        # The unknown and cuttlefish families attempt native liblp extraction
+        # of dynamic partitions from super.img below; emulator_ranchu never
+        # reaches that extraction path and keeps being refused outright.
         if product.dynamic_partitions or product.super_image is not None:
             if product.super_image is not None:
                 ignored[str(product.super_image)] = "not an ordinary disk"
-            if product.family != "unknown":
+            if product.family not in ("unknown", "cuttlefish"):
                 errors.append("super.img / dynamic partitions cannot be attached as an ordinary QEMU disk")
 
         # ── vendor_boot refusal ─────────────────────────────────────────────
@@ -199,21 +199,21 @@ class QemuBackend(Backend):
         if options.vendor_boot is not None:
             errors.append("vendor_boot must not be passed as -initrd or -drive")
             ignored[str(options.vendor_boot)] = "never -initrd or -drive"
-        # product.vendor_boot is refused except for the unknown-family native-parse path
-        if product.vendor_boot is not None and product.family != "unknown":
+        # product.vendor_boot is consumed by the unknown/cuttlefish native-parse path
+        if product.vendor_boot is not None and product.family not in ("unknown", "cuttlefish"):
             errors.append("vendor_boot must not be passed as -initrd or -drive")
             ignored[str(product.vendor_boot)] = "never -initrd or -drive"
 
-        # ── init_boot is ignored unless the unknown family consumes it ───────
-        if product.init_boot is not None and product.family != "unknown":
+        # ── init_boot is ignored unless the unknown/cuttlefish family consumes it ─
+        if product.init_boot is not None and product.family not in ("unknown", "cuttlefish"):
             ignored[str(product.init_boot)] = "init_boot is not used as QEMU initrd in v1"
 
         # ── extra_args gate (all families) ──────────────────────────────────
         if options.extra_args and not options.allow_extra_args:
             errors.append("--extra-arg requires --allow-extra-args")
 
-        # ── early exit for non-unknown families or when errors already set ──
-        if product.family in ("cuttlefish", "emulator_ranchu"):
+        # ── early exit for ranchu or when errors already set ────────────────
+        if product.family == "emulator_ranchu":
             # legacy "missing kernel/ramdisk" messages kept exactly
             kernel = options.kernel or product.kernel
             ramdisk = options.ramdisk or product.ramdisk
@@ -235,7 +235,7 @@ class QemuBackend(Backend):
                 extra_args_applied=False,
             )
 
-        if product.family != "unknown":
+        if product.family not in ("unknown", "cuttlefish"):
             errors.append(f"product family {product.family!r} has no QEMU evidence pack")
             return _fail(self, capabilities, errors, warnings, ignored, reasons)
 
