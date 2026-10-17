@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import struct
+import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import support  # noqa: F401
+import superimg  # noqa: F401  # patched directly in sparse tests
 
+from capabilities import ToolInfo
 from superimg import (
     LP_SECTOR_SIZE,
     LogicalPartition,
@@ -45,6 +49,16 @@ def _write(tmpdir: str, name: str, data: bytes) -> Path:
     path = Path(tmpdir) / name
     path.write_bytes(data)
     return path
+
+
+def _fake_simg2img_runner(raw_image: bytes):
+    """Return a stand-in subprocess.run that writes ``raw_image`` to argv[2]."""
+
+    def run(argv, **_kwargs):
+        Path(argv[2]).write_bytes(raw_image)
+        return subprocess.CompletedProcess(argv, returncode=0, stdout=b"", stderr=b"")
+
+    return run
 
 
 def _encode_name(name: str) -> bytes:
@@ -415,6 +429,61 @@ class TestExtractionErrors(unittest.TestCase):
             path = _write(tmpdir, "super.img", truncated)
             with self.assertRaises(SuperImageError):
                 read_super_metadata(path)
+
+
+class TestSparseHandling(unittest.TestCase):
+    def test_raw_super_image_still_parses(self) -> None:
+        """A non-sparse raw super image must use the existing byte-for-byte
+        parsing path with no conversion."""
+        payload = b"RAW" + b"\x00" * (LP_SECTOR_SIZE - 3)
+        raw_data = _build_super_image_raw({"system_a": payload})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _write(tmpdir, "super.img", raw_data)
+            metadata = read_super_metadata(path)
+            self.assertEqual([p.name for p in metadata.partitions], ["system_a"])
+            self.assertEqual(extract_partition(path, metadata, "system", "_a"), payload)
+
+    def test_sparse_super_image_is_converted_before_parsing(self) -> None:
+        """A sparse-format super.img is detected, simg2img is invoked, and
+        parsing/extraction operate on the temporary raw copy."""
+        payload = b"SPARSE" + b"\x00" * (LP_SECTOR_SIZE - 6)
+        raw_data = _build_super_image_raw({"system_a": payload})
+        sparse_data = support.sparse_header()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sparse_path = _write(tmpdir, "super.img", sparse_data)
+            fake_simg2img = Path(tmpdir) / "simg2img"
+            fake_simg2img.write_text("#!/bin/sh\n# mock")
+            with unittest.mock.patch(
+                "superimg.subprocess.run", side_effect=_fake_simg2img_runner(raw_data)
+            ):
+                metadata = read_super_metadata(sparse_path, simg2img=fake_simg2img)
+                self.assertEqual([p.name for p in metadata.partitions], ["system_a"])
+                self.assertEqual(
+                    extract_partition(
+                        sparse_path, metadata, "system", "_a", simg2img=fake_simg2img
+                    ),
+                    payload,
+                )
+
+    def test_sparse_super_image_without_simg2img_raises(self) -> None:
+        """A sparse super.img with no simg2img available must raise a clear
+        SuperImageError rather than a confusing raw parse failure."""
+
+        class _Caps:
+            pass
+
+        caps = _Caps()
+        caps.simg2img = ToolInfo(
+            name="simg2img", path=None, available=False, error="not found"
+        )
+        sparse_data = support.sparse_header()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sparse_path = _write(tmpdir, "super.img", sparse_data)
+            with unittest.mock.patch.object(
+                superimg, "discover_tools", return_value=caps
+            ):
+                with self.assertRaisesRegex(SuperImageError, "sparse.*simg2img"):
+                    read_super_metadata(sparse_path)
 
 
 if __name__ == "__main__":

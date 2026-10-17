@@ -12,9 +12,15 @@ Reference: AOSP ``system/core/fs_mgr/liblp`` — ``LpMetadataGeometry``,
 
 from __future__ import annotations
 
+import os
 import struct
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from capabilities import discover_tools
+from image_inspector import is_android_sparse
 
 LP_SECTOR_SIZE = 512
 LP_HEADER_MAGIC = 0x414C5030
@@ -282,92 +288,157 @@ def _read_block_devices(raw: bytes, offset: int, count: int, entry_size: int) ->
     return devices
 
 
-def read_super_metadata(path: Path) -> SuperMetadata:
+def _find_simg2img(simg2img: Path | None) -> Path:
+    """Resolve the simg2img executable to use for sparse conversion.
+
+    An explicit path is trusted as-is.  Otherwise the existing
+    capabilities probe is reused.
+    """
+    if simg2img is not None:
+        return simg2img
+    tool = discover_tools().simg2img
+    if not tool.available or tool.path is None:
+        raise SuperImageError(
+            "super.img is in Android sparse format but simg2img is not available; "
+            "install simg2img (e.g. from AOSP host tools) to convert it"
+        )
+    return tool.path
+
+
+def _convert_sparse(sparse_path: Path, simg2img: Path) -> Path:
+    """Convert ``sparse_path`` to a temporary raw image and return its path.
+
+    The caller is responsible for deleting the returned file.
+    """
+    try:
+        handle = tempfile.NamedTemporaryFile(suffix=".img", delete=False)
+        raw_path = Path(handle.name)
+        handle.close()
+    except OSError as exc:
+        raise SuperImageError(
+            f"cannot create temporary raw image for {sparse_path}: {exc}"
+        ) from exc
+
+    try:
+        subprocess.run(
+            [os.fspath(simg2img), os.fspath(sparse_path), os.fspath(raw_path)],
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+        try:
+            raw_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise SuperImageError(
+            f"simg2img failed to convert sparse {sparse_path}: {exc}"
+        ) from exc
+    return raw_path
+
+
+def _raw_image_path(path: Path, simg2img: Path | None) -> tuple[Path, Path | None]:
+    """Return the path to open and an optional temporary raw file to clean up."""
+    if is_android_sparse(path):
+        tool_path = _find_simg2img(simg2img)
+        raw_path = _convert_sparse(path, tool_path)
+        return raw_path, raw_path
+    return path, None
+
+
+def read_super_metadata(path: Path, *, simg2img: Path | None = None) -> SuperMetadata:
     """Parse the liblp geometry and metadata header from ``path``.
 
     Only the geometry blocks and the first metadata copy are read; the
     potentially large partition payloads are left on disk.
     """
 
-    try:
-        fh = open(path, "rb")
-    except OSError as exc:
-        raise SuperImageError(f"cannot open {path}: {exc}") from exc
-
+    raw_path, tmp_path = _raw_image_path(path, simg2img)
     try:
         try:
-            _, metadata_max_size, metadata_slot_count, logical_block_size = _read_geometry(
-                fh, _PRIMARY_GEOMETRY_OFFSET
-            )
-        except SuperImageError:
-            _, metadata_max_size, metadata_slot_count, logical_block_size = _read_geometry(
-                fh, _BACKUP_GEOMETRY_OFFSET
-            )
-
-        metadata_copy_start = _PRIMARY_METADATA_OFFSET
-        (
-            major,
-            minor,
-            header_size,
-            tables_size,
-            part_td_off,
-            part_td_num,
-            part_td_esz,
-            ext_td_off,
-            ext_td_num,
-            ext_td_esz,
-            bd_td_off,
-            bd_td_num,
-            bd_td_esz,
-        ) = _read_header(fh, metadata_copy_start)
-
-        tables_start = metadata_copy_start + header_size
-        try:
-            fh.seek(tables_start)
-            tables_raw = fh.read(tables_size)
+            fh = open(raw_path, "rb")
         except OSError as exc:
-            raise SuperImageError(f"cannot read metadata tables: {exc}") from exc
-        _require(tables_raw, tables_size, "metadata tables")
+            raise SuperImageError(f"cannot open {path}: {exc}") from exc
 
-        partitions = _read_partitions(
-            tables_raw, part_td_off, part_td_num, part_td_esz
-        )
-        extents = _read_extents(tables_raw, ext_td_off, ext_td_num, ext_td_esz)
-        block_devices = _read_block_devices(
-            tables_raw, bd_td_off, bd_td_num, bd_td_esz
-        )
-
-        # Validate extent references now that both tables are loaded.
-        for p in partitions:
-            if p.first_extent_index < 0 or p.first_extent_index + p.num_extents > len(extents):
-                raise SuperImageError(
-                    f"partition {p.name!r} has out-of-range extent indices"
+        try:
+            try:
+                _, metadata_max_size, metadata_slot_count, logical_block_size = _read_geometry(
+                    fh, _PRIMARY_GEOMETRY_OFFSET
+                )
+            except SuperImageError:
+                _, metadata_max_size, metadata_slot_count, logical_block_size = _read_geometry(
+                    fh, _BACKUP_GEOMETRY_OFFSET
                 )
 
-        # Compute each partition's total size from its extents, in bytes.
-        logical_partitions: list[LogicalPartition] = []
-        for p in partitions:
-            total_sectors = sum(
-                extents[p.first_extent_index + i].num_sectors for i in range(p.num_extents)
+            metadata_copy_start = _PRIMARY_METADATA_OFFSET
+            (
+                major,
+                minor,
+                header_size,
+                tables_size,
+                part_td_off,
+                part_td_num,
+                part_td_esz,
+                ext_td_off,
+                ext_td_num,
+                ext_td_esz,
+                bd_td_off,
+                bd_td_num,
+                bd_td_esz,
+            ) = _read_header(fh, metadata_copy_start)
+
+            tables_start = metadata_copy_start + header_size
+            try:
+                fh.seek(tables_start)
+                tables_raw = fh.read(tables_size)
+            except OSError as exc:
+                raise SuperImageError(f"cannot read metadata tables: {exc}") from exc
+            _require(tables_raw, tables_size, "metadata tables")
+
+            partitions = _read_partitions(
+                tables_raw, part_td_off, part_td_num, part_td_esz
             )
-            logical_partitions.append(
-                LogicalPartition(name=p.name, size=total_sectors * LP_SECTOR_SIZE)
+            extents = _read_extents(tables_raw, ext_td_off, ext_td_num, ext_td_esz)
+            block_devices = _read_block_devices(
+                tables_raw, bd_td_off, bd_td_num, bd_td_esz
             )
 
-        # Stash references on the metadata object for extraction.
-        metadata = SuperMetadata(
-            metadata_max_size=metadata_max_size,
-            metadata_slot_count=metadata_slot_count,
-            header_version=(major, minor),
-            logical_block_size=logical_block_size,
-            partitions=logical_partitions,
-        )
-        object.__setattr__(metadata, "_partitions", partitions)
-        object.__setattr__(metadata, "_extents", extents)
-        object.__setattr__(metadata, "_block_devices", block_devices)
-        return metadata
+            # Validate extent references now that both tables are loaded.
+            for p in partitions:
+                if p.first_extent_index < 0 or p.first_extent_index + p.num_extents > len(extents):
+                    raise SuperImageError(
+                        f"partition {p.name!r} has out-of-range extent indices"
+                    )
+
+            # Compute each partition's total size from its extents, in bytes.
+            logical_partitions: list[LogicalPartition] = []
+            for p in partitions:
+                total_sectors = sum(
+                    extents[p.first_extent_index + i].num_sectors for i in range(p.num_extents)
+                )
+                logical_partitions.append(
+                    LogicalPartition(name=p.name, size=total_sectors * LP_SECTOR_SIZE)
+                )
+
+            # Stash references on the metadata object for extraction.
+            metadata = SuperMetadata(
+                metadata_max_size=metadata_max_size,
+                metadata_slot_count=metadata_slot_count,
+                header_version=(major, minor),
+                logical_block_size=logical_block_size,
+                partitions=logical_partitions,
+            )
+            object.__setattr__(metadata, "_partitions", partitions)
+            object.__setattr__(metadata, "_extents", extents)
+            object.__setattr__(metadata, "_block_devices", block_devices)
+            return metadata
+        finally:
+            fh.close()
     finally:
-        fh.close()
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _get_partition(metadata: SuperMetadata, base_name: str, slot_suffix: str) -> _Partition:
@@ -390,6 +461,8 @@ def extract_partition(
     metadata: SuperMetadata,
     base_name: str,
     slot_suffix: str = "",
+    *,
+    simg2img: Path | None = None,
 ) -> bytes:
     """Extract the raw bytes of logical partition ``base_name + slot_suffix``.
 
@@ -400,45 +473,53 @@ def extract_partition(
     partition = _get_partition(metadata, base_name, slot_suffix)
     extents = metadata._extents  # type: ignore[attr-defined]
 
+    raw_path, tmp_path = _raw_image_path(super_path, simg2img)
     try:
-        fh = open(super_path, "rb")
-    except OSError as exc:
-        raise SuperImageError(f"cannot open {super_path}: {exc}") from exc
+        try:
+            fh = open(raw_path, "rb")
+        except OSError as exc:
+            raise SuperImageError(f"cannot open {super_path}: {exc}") from exc
 
-    try:
-        out = bytearray()
-        for i in range(partition.num_extents):
-            extent = extents[partition.first_extent_index + i]
-            if extent.target_type != LP_TARGET_TYPE_LINEAR:
-                raise SuperImageError(
-                    f"partition {partition.name!r} extent {i} has unsupported target type "
-                    f"{extent.target_type}"
-                )
-            # ``target_source`` identifies which block device the extent lives
-            # on; validate it exists even though this single-super-device
-            # implementation only supports device index 0.
-            _get_block_device(metadata, extent.target_source)
-            # ``target_data`` already is the absolute sector number on the
-            # target block device (confirmed against a real built super.img);
-            # it must NOT be added to the device's first_logical_sector.
-            byte_offset = extent.target_data * LP_SECTOR_SIZE
-            byte_length = extent.num_sectors * LP_SECTOR_SIZE
-            try:
-                fh.seek(byte_offset)
-                chunk = fh.read(byte_length)
-            except OSError as exc:
-                raise SuperImageError(
-                    f"cannot read partition {partition.name!r} extent {i}: {exc}"
-                ) from exc
-            if len(chunk) < byte_length:
-                raise SuperImageError(
-                    f"short read for partition {partition.name!r} extent {i}: "
-                    f"expected {byte_length} bytes, got {len(chunk)}"
-                )
-            out += chunk
-        return bytes(out)
+        try:
+            out = bytearray()
+            for i in range(partition.num_extents):
+                extent = extents[partition.first_extent_index + i]
+                if extent.target_type != LP_TARGET_TYPE_LINEAR:
+                    raise SuperImageError(
+                        f"partition {partition.name!r} extent {i} has unsupported target type "
+                        f"{extent.target_type}"
+                    )
+                # ``target_source`` identifies which block device the extent lives
+                # on; validate it exists even though this single-super-device
+                # implementation only supports device index 0.
+                _get_block_device(metadata, extent.target_source)
+                # ``target_data`` already is the absolute sector number on the
+                # target block device (confirmed against a real built super.img);
+                # it must NOT be added to the device's first_logical_sector.
+                byte_offset = extent.target_data * LP_SECTOR_SIZE
+                byte_length = extent.num_sectors * LP_SECTOR_SIZE
+                try:
+                    fh.seek(byte_offset)
+                    chunk = fh.read(byte_length)
+                except OSError as exc:
+                    raise SuperImageError(
+                        f"cannot read partition {partition.name!r} extent {i}: {exc}"
+                    ) from exc
+                if len(chunk) < byte_length:
+                    raise SuperImageError(
+                        f"short read for partition {partition.name!r} extent {i}: "
+                        f"expected {byte_length} bytes, got {len(chunk)}"
+                    )
+                out += chunk
+            return bytes(out)
+        finally:
+            fh.close()
     finally:
-        fh.close()
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def extract_partition_to_file(
@@ -447,10 +528,14 @@ def extract_partition_to_file(
     base_name: str,
     slot_suffix: str = "",
     dest_dir: Path = Path("."),
+    *,
+    simg2img: Path | None = None,
 ) -> Path:
     """Extract a logical partition and write it to ``dest_dir/<name>.img``."""
 
-    data = extract_partition(super_path, metadata, base_name, slot_suffix)
+    data = extract_partition(
+        super_path, metadata, base_name, slot_suffix, simg2img=simg2img
+    )
     # Output filename never includes the slot suffix: the caller already
     # knows which slot it asked for, and the result represents "the
     # system/vendor image to use", not "the system_a partition specifically".

@@ -28,7 +28,6 @@ from bootimg import (
     read_vendor_boot_image,
 )
 from capabilities import AccelSelection, Capabilities
-from image_inspector import inspect_file
 from models import ArtifactMapping, CommandSpec, LaunchOptions, ProductArtifacts
 from superimg import (
     SuperImageError,
@@ -36,8 +35,6 @@ from superimg import (
     extract_partition_to_file,
     read_super_metadata,
 )
-
-inspect_file  # referenced for future image validation; keep import stable
 
 _ADB_DEFAULT_PORT = 5555
 
@@ -244,7 +241,9 @@ class QemuBackend(Backend):
         slot_suffix = ""
         if (system is None or vendor is None) and product.super_image is not None:
             try:
-                _super_meta = read_super_metadata(product.super_image)
+                _super_meta = read_super_metadata(
+                    product.super_image, simg2img=capabilities.simg2img.path
+                )
             except SuperImageError as exc:
                 warnings.append(f"super.img present but metadata could not be parsed: {exc}")
                 _super_meta = None
@@ -258,7 +257,12 @@ class QemuBackend(Backend):
                 if system is None:
                     try:
                         system = extract_partition_to_file(
-                            product.super_image, _super_meta, "system", slot_suffix, Path(_super_tmpdir)
+                            product.super_image,
+                            _super_meta,
+                            "system",
+                            slot_suffix,
+                            Path(_super_tmpdir),
+                            simg2img=capabilities.simg2img.path,
                         )
                         warnings.append(
                             f"extracted 'system{slot_suffix}' from {product.super_image} via native liblp parsing"
@@ -268,7 +272,12 @@ class QemuBackend(Backend):
                 if vendor is None:
                     try:
                         vendor = extract_partition_to_file(
-                            product.super_image, _super_meta, "vendor", slot_suffix, Path(_super_tmpdir)
+                            product.super_image,
+                            _super_meta,
+                            "vendor",
+                            slot_suffix,
+                            Path(_super_tmpdir),
+                            simg2img=capabilities.simg2img.path,
                         )
                         warnings.append(
                             f"extracted 'vendor{slot_suffix}' from {product.super_image} via native liblp parsing"
