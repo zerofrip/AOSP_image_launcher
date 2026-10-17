@@ -18,6 +18,7 @@ from superimg import (
     LogicalPartition,
     SuperImageError,
     SuperMetadata,
+    available_base_partition_names,
     available_slot_suffixes,
     extract_partition,
     extract_partition_to_file,
@@ -286,6 +287,55 @@ class TestSlotSuffixes(unittest.TestCase):
             path = _write(tmpdir, "super.img", data)
             metadata = read_super_metadata(path)
             self.assertEqual(available_slot_suffixes(metadata), [""])
+
+
+class TestBasePartitionNames(unittest.TestCase):
+    def test_available_base_partition_names(self) -> None:
+        data = _build_super_image_raw({
+            "system_a": b"s" * 512,
+            "system_b": b"s" * 512,
+            "vendor_a": b"v" * 512,
+            "vendor_b": b"v" * 512,
+            "product_a": b"p" * 512,
+            "product_b": b"p" * 512,
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _write(tmpdir, "super.img", data)
+            metadata = read_super_metadata(path)
+            self.assertEqual(
+                available_base_partition_names(metadata),
+                ["product", "system", "vendor"],
+            )
+
+    def test_available_base_partition_names_preserves_dlkm_and_ext(self) -> None:
+        data = _build_super_image_raw({
+            "system_ext_a": b"e" * 512,
+            "system_ext_b": b"e" * 512,
+            "vendor_dlkm_a": b"d" * 512,
+            "odm_dlkm": b"o" * 512,
+            "odm": b"o" * 512,
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _write(tmpdir, "super.img", data)
+            metadata = read_super_metadata(path)
+            self.assertEqual(
+                available_base_partition_names(metadata),
+                ["odm", "odm_dlkm", "system_ext", "vendor_dlkm"],
+            )
+
+    def test_available_base_partition_names_non_ab(self) -> None:
+        data = _build_super_image_raw({
+            "system": b"s" * 512,
+            "vendor": b"v" * 512,
+            "product": b"p" * 512,
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _write(tmpdir, "super.img", data)
+            metadata = read_super_metadata(path)
+            self.assertEqual(
+                available_base_partition_names(metadata),
+                ["product", "system", "vendor"],
+            )
 
 
 class TestGeometryFallback(unittest.TestCase):

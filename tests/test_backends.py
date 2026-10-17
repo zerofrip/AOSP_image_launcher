@@ -504,6 +504,54 @@ class GenericQemuBackendTests(unittest.TestCase):
                 any("extracted \'vendor_a\'" in w for w in spec.warnings)
             )
 
+    def test_super_img_extracts_all_dynamic_partitions(self) -> None:
+        """A product with a multi-partition super.img must extract every
+        dynamic partition it contains (system, vendor, product, system_ext,
+        odm, vendor_dlkm, odm_dlkm) and attach them as drives."""
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_superimg import _build_super_image_raw
+
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw))
+            for name in ("system.img", "vendor.img"):
+                path = product_dir / name
+                if path.exists():
+                    path.unlink()
+            super_data = _build_super_image_raw({
+                "system_a": b"system" * 512,
+                "vendor_a": b"vendor" * 512,
+                "product_a": b"product" * 512,
+                "system_ext_a": b"systemext" * 512,
+                "odm_a": b"odm" * 1024,
+                "vendor_dlkm_a": b"vendordlkm" * 512,
+                "odm_dlkm_a": b"odmdlkm" * 512,
+            })
+            (product_dir / "super.img").write_bytes(super_data)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            for role in (
+                "system", "vendor", "product", "system_ext",
+                "odm", "vendor_dlkm", "odm_dlkm",
+            ):
+                self.assertTrue(
+                    any(f"extracted \'{role}_a\'" in w for w in spec.warnings),
+                    msg=f"missing extraction warning for {role}",
+                )
+                self.assertIn(role, spec.mapping.roles)
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            for role in ("vendor", "product", "system_ext", "odm", "vendor_dlkm", "odm_dlkm"):
+                self.assertTrue(
+                    any(f"{role}.img" in v for v in drive_values),
+                    msg=f"missing -drive entry for {role}",
+                )
+
     def test_unparseable_super_img_without_standalone_images_fails_closed(self) -> None:
         """A super.img that cannot be parsed, combined with no standalone
         system.img, must fail closed rather than crash or silently boot

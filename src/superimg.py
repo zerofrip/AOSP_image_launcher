@@ -148,6 +148,33 @@ def available_slot_suffixes(metadata: SuperMetadata) -> list[str]:
     return sorted(suffixes) if suffixes else [""]
 
 
+def _strip_slot_suffix(name: str) -> str:
+    """Strip a trailing A/B slot suffix from a partition name.
+
+    Only ``_<single lowercase letter>`` is treated as a slot suffix, so
+    ``system_a`` becomes ``system`` while ``system_ext`` and
+    ``vendor_dlkm`` are returned unchanged.
+    """
+    before, sep, suffix = name.rpartition("_")
+    if before and sep and len(suffix) == 1 and suffix.isalpha() and suffix.islower():
+        return before
+    return name
+
+
+def available_base_partition_names(metadata: SuperMetadata) -> list[str]:
+    """Return the distinct base partition names present in ``metadata``.
+
+    Slot suffixes (``_a``, ``_b``, ...) are stripped, so
+    ``["system_a", "system_b", "vendor_a"]`` yields
+    ``["system", "vendor"]``. Names like ``system_ext`` and
+    ``vendor_dlkm`` are preserved. The result is sorted for determinism.
+    """
+    base_names: set[str] = set()
+    for partition in metadata.partitions:
+        base_names.add(_strip_slot_suffix(partition.name))
+    return sorted(base_names)
+
+
 def _read_geometry(fh, offset: int) -> tuple[int, int, int, int]:
     """Return (struct_size, metadata_max_size, metadata_slot_count, logical_block_size)."""
 

@@ -33,6 +33,7 @@ from capabilities import AccelSelection, Capabilities
 from models import ArtifactMapping, CommandSpec, LaunchOptions, ProductArtifacts
 from superimg import (
     SuperImageError,
+    available_base_partition_names,
     available_slot_suffixes,
     extract_partition_to_file,
     read_super_metadata,
@@ -256,14 +257,40 @@ class QemuBackend(Backend):
         # matching androidboot.partition_map + fstab).
         system = options.system or product.system
         vendor = options.vendor or product.vendor
+        product_image = options.product_image or product.product
+        system_ext = options.system_ext or product.system_ext
+        odm = product.optional_images.get("odm")
+        vendor_dlkm = product.optional_images.get("vendor_dlkm")
+        odm_dlkm = product.optional_images.get("odm_dlkm")
+
         # ── super.img native extraction (unknown family, dynamic partitions) ─
-        # When PRODUCT_OUT has no standalone system.img/vendor.img but does
-        # have a super.img, try extracting system/vendor from it via the
-        # native liblp parser before giving up. Each partition is resolved
+        # When PRODUCT_OUT has no standalone per-partition .img files but does
+        # have a super.img, try extracting the missing dynamic partitions from
+        # it via the native liblp parser. Each partition is resolved
         # independently: failure to extract one only warns and does not
-        # block the other, or the non-super_image code paths above.
+        # block the others, or the non-super_image code paths above.
+        _SUPER_DYNAMIC_PARTITIONS = (
+            "system",
+            "vendor",
+            "product",
+            "system_ext",
+            "odm",
+            "vendor_dlkm",
+            "odm_dlkm",
+        )
         slot_suffix = ""
-        if (system is None or vendor is None) and product.super_image is not None:
+        _super_sources: dict[str, Path | None] = {
+            "system": system,
+            "vendor": vendor,
+            "product": product_image,
+            "system_ext": system_ext,
+            "odm": odm,
+            "vendor_dlkm": vendor_dlkm,
+            "odm_dlkm": odm_dlkm,
+        }
+        if product.super_image is not None and any(
+            src is None for src in _super_sources.values()
+        ):
             try:
                 _super_meta = read_super_metadata(
                     product.super_image, simg2img=capabilities.simg2img.path
@@ -277,37 +304,35 @@ class QemuBackend(Backend):
                 else:
                     _suffixes = available_slot_suffixes(_super_meta)
                     slot_suffix = _suffixes[0] if _suffixes else ""
+                _base_names = set(available_base_partition_names(_super_meta))
                 _super_tmpdir = tempfile.mkdtemp()
-                if system is None:
+                for _role in _SUPER_DYNAMIC_PARTITIONS:
+                    if _role not in _base_names:
+                        continue
+                    if _super_sources[_role] is not None:
+                        continue
                     try:
-                        system = extract_partition_to_file(
+                        _extracted = extract_partition_to_file(
                             product.super_image,
                             _super_meta,
-                            "system",
+                            _role,
                             slot_suffix,
                             Path(_super_tmpdir),
                             simg2img=capabilities.simg2img.path,
                         )
+                        _super_sources[_role] = _extracted
                         warnings.append(
-                            f"extracted 'system{slot_suffix}' from {product.super_image} via native liblp parsing"
+                            f"extracted '{_role}{slot_suffix}' from {product.super_image} via native liblp parsing"
                         )
                     except SuperImageError as exc:
-                        warnings.append(f"could not extract 'system{slot_suffix}' from super.img: {exc}")
-                if vendor is None:
-                    try:
-                        vendor = extract_partition_to_file(
-                            product.super_image,
-                            _super_meta,
-                            "vendor",
-                            slot_suffix,
-                            Path(_super_tmpdir),
-                            simg2img=capabilities.simg2img.path,
-                        )
-                        warnings.append(
-                            f"extracted 'vendor{slot_suffix}' from {product.super_image} via native liblp parsing"
-                        )
-                    except SuperImageError as exc:
-                        warnings.append(f"could not extract 'vendor{slot_suffix}' from super.img: {exc}")
+                        warnings.append(f"could not extract '{_role}{slot_suffix}' from super.img: {exc}")
+                system = _super_sources["system"]
+                vendor = _super_sources["vendor"]
+                product_image = _super_sources["product"]
+                system_ext = _super_sources["system_ext"]
+                odm = _super_sources["odm"]
+                vendor_dlkm = _super_sources["vendor_dlkm"]
+                odm_dlkm = _super_sources["odm_dlkm"]
 
         if system is None:
             errors.append("missing system image: provide --system or a PRODUCT_OUT with system.img")
@@ -316,8 +341,11 @@ class QemuBackend(Backend):
         drives: list[tuple[str, Path]] = [("system", system)]
         for role, src in [
             ("vendor", vendor),
-            ("product", options.product_image or product.product),
-            ("system_ext", options.system_ext or product.system_ext),
+            ("product", product_image),
+            ("system_ext", system_ext),
+            ("odm", odm),
+            ("vendor_dlkm", vendor_dlkm),
+            ("odm_dlkm", odm_dlkm),
             ("data", options.userdata or product.userdata),
         ]:
             if src is not None:
