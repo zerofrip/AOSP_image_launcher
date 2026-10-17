@@ -248,14 +248,14 @@ def _looks_like_legacy_lz4(data: bytes) -> bool:
     return data[:4] == _LZ4_LEGACY_MAGIC
 
 
-def _lz4_decompress(data: bytes) -> bytes:
+def _lz4_decompress(data: bytes, lz4_path: str | None = None) -> bytes:
     """Decompress legacy-framed LZ4 data via the external ``lz4`` CLI tool.
 
     No pure-Python legacy-LZ4-frame decoder is implemented, so this
-    requires ``lz4`` on PATH. Raises BootImageError if it is unavailable
-    or decompression fails — callers should treat that as "best-effort
-    enhancement unavailable", not a fatal error for the overall boot.img
-    parse.
+    requires ``lz4`` on PATH or an explicit ``lz4_path``. Raises
+    BootImageError if it is unavailable or decompression fails — callers
+    should treat that as "best-effort enhancement unavailable", not a
+    fatal error for the overall boot.img parse.
     """
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / "in.lz4"
@@ -263,7 +263,7 @@ def _lz4_decompress(data: bytes) -> bytes:
         src.write_bytes(data)
         try:
             subprocess.run(
-                ["lz4", "-d", "-f", str(src), str(dst)],
+                [lz4_path or "lz4", "-d", "-f", str(src), str(dst)],
                 check=True, capture_output=True, timeout=30,
             )
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -271,7 +271,7 @@ def _lz4_decompress(data: bytes) -> bytes:
         return dst.read_bytes()
 
 
-def _lz4_compress_legacy(data: bytes) -> bytes:
+def _lz4_compress_legacy(data: bytes, lz4_path: str | None = None) -> bytes:
     """Compress to legacy-framed LZ4 via the external ``lz4`` CLI tool
     (``-l``), matching the framing Android's own ramdisk tooling uses
     (verified against real build artifacts: generic/vendor ramdisk
@@ -283,7 +283,7 @@ def _lz4_compress_legacy(data: bytes) -> bytes:
         src.write_bytes(data)
         try:
             subprocess.run(
-                ["lz4", "-l", "-f", str(src), str(dst)],
+                [lz4_path or "lz4", "-l", "-f", str(src), str(dst)],
                 check=True, capture_output=True, timeout=30,
             )
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -315,7 +315,11 @@ def _find_cpio_trailer_offset(data: bytes) -> int:
     raise BootImageError("cpio TRAILER!!! entry not found")
 
 
-def _splice_into_ramdisk_cpio(existing_ramdisk: bytes, extra_ramdisk: bytes) -> bytes:
+def _splice_into_ramdisk_cpio(
+    existing_ramdisk: bytes,
+    extra_ramdisk: bytes,
+    lz4_path: str | None = None,
+) -> bytes:
     """Insert ``extra_ramdisk``'s cpio entries into ``existing_ramdisk``'s
     own cpio stream, before its ``TRAILER!!!`` entry, preserving whatever
     compression ``existing_ramdisk`` already had.
@@ -340,8 +344,8 @@ def _splice_into_ramdisk_cpio(existing_ramdisk: bytes, extra_ramdisk: bytes) -> 
     and fall back to not injecting ``extra_ramdisk``, not as fatal.
     """
     if _looks_like_legacy_lz4(existing_ramdisk):
-        plain = _lz4_decompress(existing_ramdisk)
-        compressor = _lz4_compress_legacy
+        plain = _lz4_decompress(existing_ramdisk, lz4_path=lz4_path)
+        compressor = lambda data: _lz4_compress_legacy(data, lz4_path=lz4_path)
     elif existing_ramdisk[:2] == b"\x1f\x8b":
         plain = gzip.decompress(existing_ramdisk)
         compressor = gzip.compress
@@ -367,6 +371,7 @@ def build_combined_initrd(
     vendor_boot: VendorBootSections | None,
     *,
     extra_ramdisk: bytes = b"",
+    lz4_path: str | None = None,
 ) -> tuple[bytes, str]:
     """Combine boot/init_boot/vendor_boot sections into (initrd_bytes, cmdline).
 
@@ -380,6 +385,10 @@ def build_combined_initrd(
     basis (see ``_splice_into_ramdisk_cpio``). The final bootconfig
     trailer's "#BOOTCONFIG\n" magic always remains the very last bytes of
     the initrd, as the kernel's bootconfig parser requires.
+
+    ``lz4_path`` (optional) is the path to the external ``lz4`` CLI tool
+    used for legacy-LZ4 ramdisk decompression/recompression. When omitted,
+    ``lz4`` on PATH is used.
 
     Raises BootImageError if no usable kernel or ramdisk can be assembled.
     """
@@ -414,7 +423,9 @@ def build_combined_initrd(
         # missing external lz4 tool, …), proceed without the enhancement
         # rather than failing the whole native boot.img parse.
         try:
-            generic_ramdisk = _splice_into_ramdisk_cpio(generic_ramdisk, extra_ramdisk)
+            generic_ramdisk = _splice_into_ramdisk_cpio(
+                generic_ramdisk, extra_ramdisk, lz4_path=lz4_path
+            )
         except BootImageError:
             pass
 

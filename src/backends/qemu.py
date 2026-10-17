@@ -408,7 +408,11 @@ class QemuBackend(Backend):
                                 extra_ramdisk = extra_ramdisk + modules_ramdisk
 
                     combined_bytes, boot_cmdline = build_combined_initrd(
-                        boot_sec, init_sec, vend_sec, extra_ramdisk=extra_ramdisk
+                        boot_sec,
+                        init_sec,
+                        vend_sec,
+                        extra_ramdisk=extra_ramdisk,
+                        lz4_path=str(capabilities.lz4.path) if capabilities.lz4.available else None,
                     )
                     boot_cmdline = " ".join(
                         s for s in [

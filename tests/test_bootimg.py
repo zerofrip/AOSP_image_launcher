@@ -579,6 +579,66 @@ class SpliceIntoLz4RamdiskCpioTests(unittest.TestCase):
         self.assertLess(decompressed.index(b"ORIGDATA"), decompressed.index(b"EXTRADATA"))
 
 
+class Lz4PathTests(unittest.TestCase):
+    def _fake_lz4_run(self, argv, **kwargs):
+        import subprocess
+
+        self.recorded_argv = list(argv)
+        # argv: [lz4, -d|-l, -f, src, dst]
+        op = argv[1]
+        src = Path(argv[3])
+        dst = Path(argv[4])
+        if op == "-d":
+            # Strip our fake legacy-LZ4 magic for decompression.
+            data = src.read_bytes()
+            dst.write_bytes(data[4:] if data.startswith(b"\x02\x21\x4c\x18") else data)
+        else:
+            dst.write_bytes(b"\x02\x21\x4c\x18" + src.read_bytes())
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def test_lz4_path_used_for_decompress_and_compress(self) -> None:
+        import subprocess
+        from bootimg import pack_cpio_newc, _splice_into_ramdisk_cpio
+
+        existing_plain = pack_cpio_newc([("orig.txt", b"ORIGDATA")])
+        existing_lz4 = b"\x02\x21\x4c\x18" + existing_plain
+        extra = pack_cpio_newc([("extra.txt", b"EXTRADATA")])
+
+        with unittest.mock.patch("bootimg.subprocess.run", side_effect=self._fake_lz4_run):
+            result = _splice_into_ramdisk_cpio(existing_lz4, extra, lz4_path="/custom/lz4")
+
+        self.assertEqual(self.recorded_argv[0], "/custom/lz4")
+        self.assertIn("-l", self.recorded_argv)
+        self.assertEqual(result[:4], b"\x02\x21\x4c\x18")
+
+    def test_build_combined_initrd_threads_lz4_path(self) -> None:
+        import subprocess
+        from bootimg import pack_cpio_newc
+
+        existing_plain = pack_cpio_newc([("orig.txt", b"ORIGDATA")])
+        existing_lz4 = b"\x02\x21\x4c\x18" + existing_plain
+        extra = pack_cpio_newc([("extra.txt", b"EXTRADATA")])
+
+        with tempfile.TemporaryDirectory() as raw:
+            boot_path = _write(raw, "boot.img", _make_v3v4_boot(
+                header_version=4, kernel=b"K", ramdisk=b""
+            ))
+            init_boot_path = _write(raw, "init_boot.img", _make_v3v4_boot(
+                header_version=4, kernel=b"", ramdisk=existing_lz4
+            ))
+            boot_sec = read_boot_image(boot_path)
+            init_sec = read_boot_image(init_boot_path)
+
+            with unittest.mock.patch("bootimg.subprocess.run", side_effect=self._fake_lz4_run):
+                combined, _cmdline = build_combined_initrd(
+                    boot_sec, init_sec, None, extra_ramdisk=extra, lz4_path="/custom/lz4"
+                )
+
+        self.assertEqual(self.recorded_argv[0], "/custom/lz4")
+        self.assertIn(b"orig.txt", combined)
+        self.assertIn(b"extra.txt", combined)
+
+
 class ReadKernelVersionTests(unittest.TestCase):
     def test_extracts_version_from_banner(self) -> None:
         from bootimg import _read_kernel_version

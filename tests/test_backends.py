@@ -99,6 +99,7 @@ def _caps(
         lpunpack=_missing_tool("lpunpack"),
         simg2img=_missing_tool("simg2img"),
         avbtool=_missing_tool("avbtool"),
+        lz4=_missing_tool("lz4"),
         launch_cvd=launch_cvd_tool,
     )
 

@@ -78,6 +78,7 @@ class Capabilities:
     lpunpack: ToolInfo
     simg2img: ToolInfo
     avbtool: ToolInfo
+    lz4: ToolInfo
     diagnostics: list[str] = field(default_factory=list)
     launch_cvd: ToolInfo = field(
         default_factory=lambda: ToolInfo(name="launch_cvd", path=None, available=False)
@@ -190,9 +191,10 @@ def discover_tools(
     lpunpack = _find_aosp_host_tool("lpunpack", which_fn, env, product_out, is_file_fn)
     simg2img = _find_aosp_host_tool("simg2img", which_fn, env, product_out, is_file_fn)
     avbtool = _find_aosp_host_tool("avbtool", which_fn, env, product_out, is_file_fn)
+    lz4 = _find_aosp_host_tool("lz4", which_fn, env, product_out, is_file_fn)
     launch_cvd = _tool_from_which("launch_cvd", which_fn, extra_names=("cvd",))
 
-    for tool in (emulator, qemu, emulator_check, unpack_bootimg, lpunpack, simg2img, avbtool):
+    for tool in (emulator, qemu, emulator_check, unpack_bootimg, lpunpack, simg2img, avbtool, lz4):
         if not tool.available:
             diagnostics.append(tool.error or f"{tool.name} not found")
     return Capabilities(
@@ -204,6 +206,7 @@ def discover_tools(
         lpunpack=lpunpack,
         simg2img=simg2img,
         avbtool=avbtool,
+        lz4=lz4,
         diagnostics=diagnostics,
         launch_cvd=launch_cvd,
     )

@@ -10,6 +10,8 @@ import support  # noqa: F401  — inserts src/ on sys.path
 from capabilities import (
     AccelProbe,
     HostEnvironment,
+    ToolInfo,
+    discover_tools,
     parse_accel_help,
     probe_accelerators,
     select_accelerator,
@@ -157,6 +159,47 @@ class AcceleratorSelectionTests(unittest.TestCase):
         reported = parse_accel_help(text)
         self.assertIn("kvm", reported)
         self.assertNotIn("whpx", reported)
+
+
+class Lz4DiscoveryTests(unittest.TestCase):
+    def test_lz4_found_on_path(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda name: "/usr/bin/lz4" if name == "lz4" else None,
+            is_file=lambda _path: True,
+        )
+        self.assertTrue(caps.lz4.available)
+        self.assertEqual(caps.lz4.path, Path("/usr/bin/lz4"))
+        self.assertEqual(caps.lz4.details, "PATH")
+
+    def test_lz4_found_in_aosp_host_out(self) -> None:
+        caps = discover_tools(
+            environ={"ANDROID_HOST_OUT": "/aosp/out/host/linux-x86"},
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/lz4",
+        )
+        self.assertTrue(caps.lz4.available)
+        self.assertEqual(caps.lz4.path, Path("/aosp/out/host/linux-x86/bin/lz4"))
+        self.assertEqual(caps.lz4.details, "ANDROID_HOST_OUT/bin")
+
+    def test_lz4_found_under_product_out(self) -> None:
+        caps = discover_tools(
+            environ={},
+            product_out=Path("/aosp/out/target/product/generic_x86_64"),
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/lz4",
+        )
+        self.assertTrue(caps.lz4.available)
+        self.assertEqual(caps.lz4.path, Path("/aosp/out/host/linux-x86/bin/lz4"))
+
+    def test_lz4_missing_reported_in_diagnostics(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda _name: None,
+            is_file=lambda _path: False,
+        )
+        self.assertFalse(caps.lz4.available)
+        self.assertTrue(any("lz4" in d for d in caps.diagnostics))
 
 
 if __name__ == "__main__":
