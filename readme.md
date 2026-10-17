@@ -178,18 +178,18 @@ Use the goldfish/ranchu `sdk_phone64_x86_64-trunk_staging-userdebug` product. Cu
 
 ```bash
 python3 src/launcher.py \
-  --build-aosp /home/one/android-latest-release \
+  --build-aosp /path/to/android-latest-release \
   --lunch sdk_phone64_x86_64-trunk_staging-userdebug \
   --build-jobs 4 \
   --headless
 
 # Build and validate only; do not launch a guest
 python3 src/launcher.py \
-  --build-aosp /home/one/android-latest-release \
+  --build-aosp /path/to/android-latest-release \
   --build-only
 
 # Makefile wrapper
-make build-aosp AOSP_ROOT=/home/one/android-latest-release
+make build-aosp AOSP_ROOT=/path/to/android-latest-release
 ```
 
 The build uses a fixed Bash script with the lunch target and build targets passed as positional arguments; it does not concatenate user values into shell source. `PRODUCT_OUT` must resolve below `<AOSP_ROOT>/out/target/product`. `--build-target` may be repeated when a narrower AOSP target is intentionally required; the default `droid` build is the supported path.
@@ -270,12 +270,12 @@ options:
 
 ### Real `vsoc_x86_64` `--diagnose` (captured)
 
-Inspected `/home/zero/android-latest-release/out/target/product/vsoc_x86_64` (exit 0). No files in that tree were modified (SHA-256 / size / mtime of `android-info.txt`, `required_images`, and `userdata.img` were identical before and after).
+Inspected `/path/to/android-latest-release/out/target/product/vsoc_x86_64` (exit 0). No files in that tree were modified (SHA-256 / size / mtime of `android-info.txt`, `required_images`, and `userdata.img` were identical before and after).
 
 ```
 StartLoader PRODUCT_OUT diagnosis
-product_out: /home/zero/android-latest-release/out/target/product/vsoc_x86_64
-requested:   /home/zero/android-latest-release/out/target/product/vsoc_x86_64
+product_out: /path/to/android-latest-release/out/target/product/vsoc_x86_64
+requested:   /path/to/android-latest-release/out/target/product/vsoc_x86_64
 target:      vsoc_x86_64
 architecture: x86_64
 family:      cuttlefish (confidence high)
@@ -283,15 +283,15 @@ dynamic_partitions: True
 incomplete:  False
 
 Artifacts:
-  kernel       detected     /home/zero/android-latest-release/out/target/product/vsoc_x86_64/kernel
-  ramdisk      detected     /home/zero/android-latest-release/out/target/product/vsoc_x86_64/ramdisk.img
-  boot         detected     /home/zero/android-latest-release/out/target/product/vsoc_x86_64/boot.img
-  vendor_boot  unsupported  /home/zero/android-latest-release/out/target/product/vsoc_x86_64/vendor_boot.img
-  init_boot    detected     /home/zero/android-latest-release/out/target/product/vsoc_x86_64/init_boot.img
-  system       detected     /home/zero/android-latest-release/out/target/product/vsoc_x86_64/system.img
-  vendor       detected     /home/zero/android-latest-release/out/target/product/vsoc_x86_64/vendor.img
-  userdata     detected     /home/zero/android-latest-release/out/target/product/vsoc_x86_64/userdata.img
-  super        unsupported  /home/zero/android-latest-release/out/target/product/vsoc_x86_64/super.img
+  kernel       detected     /path/to/android-latest-release/out/target/product/vsoc_x86_64/kernel
+  ramdisk      detected     /path/to/android-latest-release/out/target/product/vsoc_x86_64/ramdisk.img
+  boot         detected     /path/to/android-latest-release/out/target/product/vsoc_x86_64/boot.img
+  vendor_boot  unsupported  /path/to/android-latest-release/out/target/product/vsoc_x86_64/vendor_boot.img
+  init_boot    detected     /path/to/android-latest-release/out/target/product/vsoc_x86_64/init_boot.img
+  system       detected     /path/to/android-latest-release/out/target/product/vsoc_x86_64/system.img
+  vendor       detected     /path/to/android-latest-release/out/target/product/vsoc_x86_64/vendor.img
+  userdata     detected     /path/to/android-latest-release/out/target/product/vsoc_x86_64/userdata.img
+  super        unsupported  /path/to/android-latest-release/out/target/product/vsoc_x86_64/super.img
   note: vendor_boot is never passed as -initrd or -drive
   note: super.img is not a regular disk
 
@@ -322,13 +322,13 @@ Issues:
 
 Host: wsl cpus=16 kvm_exists=True kvm_accessible=True
 Tools:
-  emulator         /home/zero/android-latest-release/prebuilts/android-emulator/linux-x86_64/emulator
+  emulator         /path/to/android-latest-release/prebuilts/android-emulator/linux-x86_64/emulator
   qemu-system-x86_64 not found
-  emulator-check   /home/zero/android-latest-release/prebuilts/android-emulator/linux-x86_64/emulator-check
-  unpack_bootimg   /home/zero/android-latest-release/out/host/linux-x86/bin/unpack_bootimg
+  emulator-check   /path/to/android-latest-release/prebuilts/android-emulator/linux-x86_64/emulator-check
+  unpack_bootimg   /path/to/android-latest-release/out/host/linux-x86/bin/unpack_bootimg
   lpunpack         not found
   simg2img         /usr/bin/simg2img
-  avbtool          /home/zero/android-latest-release/out/host/linux-x86/bin/avbtool
+  avbtool          /path/to/android-latest-release/out/host/linux-x86/bin/avbtool
 
 backend:     cuttlefish
 bootable:     False
