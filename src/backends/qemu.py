@@ -782,6 +782,32 @@ class QemuBackend(Backend):
             f"vhost-vsock-pci,guest-cid=3,addr=0x{vsock_slot:x}",
         ]
 
+        # Virtio-serial + 20 virtconsole ports: many Cuttlefish guest HALs
+        # (oemlock, sensors multihal, uwb, nfc, bt_hci, ...) open a specific,
+        # hardcoded /dev/hvcN node and FATAL-crash if it does not exist. The
+        # guest kernel numbers hvc devices strictly by declaration order, so
+        # all 20 indices real launch_cvd declares (kDefaultNumHvcs=20,
+        # device/google/cuttlefish/host/libs/vm_manager/vm_manager.h) must be
+        # present in the same fixed order or every later index shifts. None
+        # of this project's host-side simulation daemons exist, so every port
+        # is backed by a plain null chardev sink (real launch_cvd does the
+        # same for any disabled feature): open() succeeds, reads return EOF,
+        # writes are discarded. The virtio-serial-pci bus sits at the next
+        # free slot after vhost-vsock-pci; individual virtconsole ports are
+        # logical devices on that bus and need no PCI address of their own.
+        serial_slot = vsock_slot + 1
+        argv += [
+            "-device",
+            f"virtio-serial-pci-non-transitional,max_ports=31,"
+            f"id=virtio-serial,addr=0x{serial_slot:x}",
+        ]
+        for hvc_index in range(20):
+            argv += [
+                "-chardev", f"null,id=hvc{hvc_index}",
+                "-device",
+                f"virtconsole,bus=virtio-serial.0,chardev=hvc{hvc_index}",
+            ]
+
         # networking: prefer user-mode slirp + hostfwd for ADB, but this
         # qemu binary may have been built without libslirp (-netdev user is
         # then rejected at runtime, not at argv time). Probe compiled-in

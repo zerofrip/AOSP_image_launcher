@@ -647,6 +647,66 @@ class GenericQemuBackendTests(unittest.TestCase):
             cmdline = spec.argv[spec.argv.index("-append") + 1]
             self.assertNotIn("vhost-vsock", cmdline)
 
+    def test_virtio_serial_hvc_sinks_added_after_vsock_slot(self) -> None:
+        """A virtio-serial-pci-non-transitional bus with max_ports=31 must be
+        present above the vhost-vsock slot, and all 20 Cuttlefish /dev/hvcN
+        virtconsole ports (hvc0..hvc19) must be declared as null-sink-backed
+        chardev/device pairs in exact index order, so guest HALs that open
+        hardcoded /dev/hvcN nodes never get ENOENT."""
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_slots: list[int] = []
+            vsock_slot: int | None = None
+            serial_device: str | None = None
+            for i, arg in enumerate(spec.argv):
+                if arg != "-device":
+                    continue
+                value = spec.argv[i + 1]
+                if "virtio-blk-pci" in value:
+                    for part in value.split(","):
+                        if part.startswith("addr="):
+                            drive_slots.append(int(part[5:], 16))
+                elif "vhost-vsock-pci" in value:
+                    for part in value.split(","):
+                        if part.startswith("addr="):
+                            vsock_slot = int(part[5:], 16)
+                elif "virtio-serial-pci-non-transitional" in value:
+                    serial_device = value
+            self.assertIsNotNone(serial_device)
+            assert serial_device is not None
+            self.assertIn("max_ports=31", serial_device)
+            self.assertIn("id=virtio-serial", serial_device)
+            slot_parts = [p for p in serial_device.split(",") if p.startswith("addr=")]
+            self.assertEqual(len(slot_parts), 1)
+            serial_slot = int(slot_parts[0][5:], 16)
+            self.assertIsNotNone(vsock_slot)
+            assert vsock_slot is not None
+            self.assertGreater(serial_slot, vsock_slot)
+            self.assertGreater(serial_slot, max(drive_slots))
+            # All 20 hvc0..hvc19 chardev/virtconsole pairs, in exact order.
+            chardev_ids: list[int] = []
+            console_ids: list[int] = []
+            for i, arg in enumerate(spec.argv):
+                if arg == "-chardev":
+                    value = spec.argv[i + 1]
+                    if value.startswith("null,id=hvc"):
+                        chardev_ids.append(int(value[len("null,id=hvc"):]))
+                elif arg == "-device":
+                    value = spec.argv[i + 1]
+                    if value.startswith("virtconsole,bus=virtio-serial.0,chardev=hvc"):
+                        console_ids.append(
+                            int(value[len("virtconsole,bus=virtio-serial.0,chardev=hvc"):])
+                        )
+            self.assertEqual(chardev_ids, list(range(20)))
+            self.assertEqual(console_ids, list(range(20)))
+
     def test_data_drive_is_writable_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
