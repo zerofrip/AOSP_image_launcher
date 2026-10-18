@@ -43,17 +43,41 @@ def _is_erofs_image(path: Path) -> bool:
     return data[EROFS_MAGIC_OFFSET:EROFS_MAGIC_OFFSET + len(EROFS_MAGIC)] == EROFS_MAGIC
 
 
+def _resolve_prop_value(key: str, value: str, aosp_root: Path) -> str:
+    """Join AOSP-root-relative filesystem paths in prop values with aosp_root.
+
+    Paths in the real generated vendor prop file (e.g. selinux_fc,
+    erofs_default_compress_hints) are relative to the AOSP source root,
+    not to the working directory build_image is invoked from. Absolute
+    values and non-path values (e.g. mount_point) pass through unchanged.
+    """
+    if not value or Path(value).is_absolute():
+        return value
+    if key.endswith("_fc") or "compress_hints" in key:
+        return str(aosp_root / value)
+    return value
+
+
 def _build_properties_file(
     aosp_root: Path,
     product_out: Path,
     tmpdir: Path,
 ) -> Path:
+    aosp_root = aosp_root.resolve()
     prop_path = tmpdir / "vendor.prop"
     glob_base = aosp_root / "out/soong/.intermediates/build/soong/fsgen"
     matches = sorted(glob_base.glob("*_generated_vendor_image/android_common/prop"))
     if len(matches) == 1:
         text = matches[0].read_text(encoding="utf-8", errors="replace")
-        lines = [line for line in text.splitlines() if not line.startswith("avb_")]
+        lines = []
+        for line in text.splitlines():
+            if line.startswith("avb_"):
+                continue
+            key, sep, value = line.partition("=")
+            if sep:
+                lines.append(f"{key}={_resolve_prop_value(key, value, aosp_root)}")
+            else:
+                lines.append(line)
         prop_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     else:
         file_contexts = aosp_root / _FILE_CONTEXTS_BIN

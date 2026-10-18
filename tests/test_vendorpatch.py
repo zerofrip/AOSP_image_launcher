@@ -136,6 +136,44 @@ class PropertiesFileTests(unittest.TestCase):
             self.assertNotIn("avb_include_desc", text)
             self.assertNotIn("avb_", text)
 
+    def test_relative_paths_resolved_against_aosp_root(self) -> None:
+        from vendorpatch import _build_properties_file
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = Path(raw) / "aosp"
+            prop_dir = (
+                aosp_root
+                / "out/soong/.intermediates/build/soong/fsgen"
+                / "foo_generated_vendor_image/android_common"
+            )
+            prop_dir.mkdir(parents=True)
+            prop_dir.joinpath("prop").write_text(
+                "fs_type=erofs\n"
+                "mount_point=vendor\n"
+                "erofs_default_compress_hints=device/google/cuttlefish/shared/erofs_compress_hints.txt\n"
+                "selinux_fc=out/soong/.intermediates/system/sepolicy/file_contexts_bin_gen/"
+                "android_common/gen/file_contexts.bin\n",
+                encoding="utf-8",
+            )
+            tmpdir = Path(raw) / "work"
+            tmpdir.mkdir()
+            prop_path = _build_properties_file(
+                aosp_root, Path("/product/out"), tmpdir
+            )
+            text = prop_path.read_text(encoding="utf-8")
+            expected_fc = aosp_root / (
+                "out/soong/.intermediates/system/sepolicy/"
+                "file_contexts_bin_gen/android_common/gen/file_contexts.bin"
+            )
+            expected_hints = aosp_root / (
+                "device/google/cuttlefish/shared/erofs_compress_hints.txt"
+            )
+            self.assertIn(f"selinux_fc={expected_fc}", text)
+            self.assertIn(f"erofs_default_compress_hints={expected_hints}", text)
+            self.assertIn("mount_point=vendor", text)
+            self.assertNotIn("selinux_fc=out/", text)
+            self.assertNotIn("compress_hints=device/", text)
+
     def test_zero_matches_uses_minimal_fallback(self) -> None:
         from vendorpatch import _build_properties_file, _FILE_CONTEXTS_BIN
 
