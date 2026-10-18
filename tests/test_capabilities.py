@@ -243,5 +243,128 @@ class Mke2fsDiscoveryTests(unittest.TestCase):
         self.assertTrue(any("mke2fs" in d for d in caps.diagnostics))
 
 
+class FsckErofsDiscoveryTests(unittest.TestCase):
+    def test_fsck_erofs_found_on_path(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda name: "/usr/bin/fsck.erofs" if name == "fsck.erofs" else None,
+            is_file=lambda _path: True,
+        )
+        self.assertTrue(caps.fsck_erofs.available)
+        self.assertEqual(caps.fsck_erofs.path, Path("/usr/bin/fsck.erofs"))
+        self.assertEqual(caps.fsck_erofs.details, "PATH")
+
+    def test_fsck_erofs_found_in_aosp_host_out(self) -> None:
+        caps = discover_tools(
+            environ={"ANDROID_HOST_OUT": "/aosp/out/host/linux-x86"},
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/fsck.erofs",
+        )
+        self.assertTrue(caps.fsck_erofs.available)
+        self.assertEqual(caps.fsck_erofs.path, Path("/aosp/out/host/linux-x86/bin/fsck.erofs"))
+        self.assertEqual(caps.fsck_erofs.details, "ANDROID_HOST_OUT/bin")
+
+    def test_fsck_erofs_found_under_product_out(self) -> None:
+        caps = discover_tools(
+            environ={},
+            product_out=Path("/aosp/out/target/product/generic_x86_64"),
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/fsck.erofs",
+        )
+        self.assertTrue(caps.fsck_erofs.available)
+        self.assertEqual(caps.fsck_erofs.path, Path("/aosp/out/host/linux-x86/bin/fsck.erofs"))
+
+    def test_fsck_erofs_missing_reported_in_diagnostics(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda _name: None,
+            is_file=lambda _path: False,
+        )
+        self.assertFalse(caps.fsck_erofs.available)
+        self.assertTrue(any("fsck.erofs" in d for d in caps.diagnostics))
+
+
+class MkfsErofsDiscoveryTests(unittest.TestCase):
+    def test_mkfs_erofs_found_on_path(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda name: "/usr/bin/mkfs.erofs" if name == "mkfs.erofs" else None,
+            is_file=lambda _path: True,
+        )
+        self.assertTrue(caps.mkfs_erofs.available)
+        self.assertEqual(caps.mkfs_erofs.path, Path("/usr/bin/mkfs.erofs"))
+        self.assertEqual(caps.mkfs_erofs.details, "PATH")
+
+    def test_mkfs_erofs_found_in_aosp_host_out(self) -> None:
+        caps = discover_tools(
+            environ={"ANDROID_HOST_OUT": "/aosp/out/host/linux-x86"},
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/mkfs.erofs",
+        )
+        self.assertTrue(caps.mkfs_erofs.available)
+        self.assertEqual(caps.mkfs_erofs.path, Path("/aosp/out/host/linux-x86/bin/mkfs.erofs"))
+        self.assertEqual(caps.mkfs_erofs.details, "ANDROID_HOST_OUT/bin")
+
+    def test_mkfs_erofs_found_under_product_out(self) -> None:
+        caps = discover_tools(
+            environ={},
+            product_out=Path("/aosp/out/target/product/generic_x86_64"),
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/mkfs.erofs",
+        )
+        self.assertTrue(caps.mkfs_erofs.available)
+        self.assertEqual(caps.mkfs_erofs.path, Path("/aosp/out/host/linux-x86/bin/mkfs.erofs"))
+
+    def test_mkfs_erofs_missing_reported_in_diagnostics(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda _name: None,
+            is_file=lambda _path: False,
+        )
+        self.assertFalse(caps.mkfs_erofs.available)
+        self.assertTrue(any("mkfs.erofs" in d for d in caps.diagnostics))
+
+
+class BuildImageDiscoveryTests(unittest.TestCase):
+    def test_build_image_found_on_path(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda name: "/usr/bin/build_image" if name == "build_image" else None,
+            is_file=lambda _path: True,
+        )
+        self.assertTrue(caps.build_image.available)
+        self.assertEqual(caps.build_image.path, Path("/usr/bin/build_image"))
+        self.assertEqual(caps.build_image.details, "PATH")
+
+    def test_build_image_found_in_aosp_host_out(self) -> None:
+        caps = discover_tools(
+            environ={"ANDROID_HOST_OUT": "/aosp/out/host/linux-x86"},
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/build_image",
+        )
+        self.assertTrue(caps.build_image.available)
+        self.assertEqual(caps.build_image.path, Path("/aosp/out/host/linux-x86/bin/build_image"))
+        self.assertEqual(caps.build_image.details, "ANDROID_HOST_OUT/bin")
+
+    def test_build_image_found_under_product_out(self) -> None:
+        caps = discover_tools(
+            environ={},
+            product_out=Path("/aosp/out/target/product/generic_x86_64"),
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/build_image",
+        )
+        self.assertTrue(caps.build_image.available)
+        self.assertEqual(caps.build_image.path, Path("/aosp/out/host/linux-x86/bin/build_image"))
+
+    def test_build_image_missing_reported_in_diagnostics(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda _name: None,
+            is_file=lambda _path: False,
+        )
+        self.assertFalse(caps.build_image.available)
+        self.assertTrue(any("build_image" in d for d in caps.diagnostics))
+
+
 if __name__ == "__main__":
     unittest.main()

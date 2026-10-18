@@ -36,6 +36,7 @@ from bootimg import (
 )
 from capabilities import AccelSelection, Capabilities
 from models import ArtifactMapping, CommandSpec, LaunchOptions, ProductArtifacts
+from vendorpatch import patch_vendor_image
 from superimg import (
     SuperImageError,
     available_base_partition_names,
@@ -471,6 +472,36 @@ class QemuBackend(Backend):
                         role_names, hardware=hardware_name
                     )
                     boot_devices, pci_slots = build_pci_boot_devices(len(drives))
+
+                    # First-stage init sees the synthetic fstab injected into
+                    # the ramdisk, but after switch_root to /system only files
+                    # on the real vendor partition remain visible. Patch the
+                    # real vendor.img with an identical minimal fstab file so
+                    # second-stage init and BootControl can find /misc.
+                    aosp_root = options.aosp_root or _find_aosp_root(product.product_out)
+                    vendor_idx: int | None = None
+                    vendor_path: Path | None = None
+                    for i, (role, src) in enumerate(drives):
+                        if role == "vendor":
+                            vendor_idx = i
+                            vendor_path = src
+                            break
+                    if vendor_path is not None:
+                        patched_vendor, patch_warning = patch_vendor_image(
+                            vendor_path,
+                            fstab_filename=fstab_name,
+                            misc_device="/dev/block/by-name/misc",
+                            aosp_root=aosp_root,
+                            product_out=product.product_out,
+                            fsck_erofs=capabilities.fsck_erofs,
+                            mkfs_erofs=capabilities.mkfs_erofs,
+                            build_image=capabilities.build_image,
+                        )
+                        if patched_vendor is not None and vendor_idx is not None:
+                            drives[vendor_idx] = ("vendor", patched_vendor)
+                        elif patch_warning:
+                            warnings.append(patch_warning)
+
                     # drives[i] gets PCI slot pci_slots[i] — the drive-building
                     # section below (-device virtio-blk-pci,addr=...) must use
                     # the exact same slot assignment for this to be correct.

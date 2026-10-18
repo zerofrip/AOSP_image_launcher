@@ -73,6 +73,9 @@ def _caps(
     qemu: Path | None = None,
     launch_cvd: Path | None = None,
     mke2fs: Path | None = None,
+    fsck_erofs: Path | None = None,
+    mkfs_erofs: Path | None = None,
+    build_image: Path | None = None,
     kvm_accessible: bool = True,
 ) -> Capabilities:
     emu = (
@@ -95,6 +98,21 @@ def _caps(
         if mke2fs is not None
         else _missing_tool("mke2fs")
     )
+    fsck_erofs_tool = (
+        ToolInfo(name="fsck.erofs", path=fsck_erofs, available=True, details="mock")
+        if fsck_erofs is not None
+        else _missing_tool("fsck.erofs")
+    )
+    mkfs_erofs_tool = (
+        ToolInfo(name="mkfs.erofs", path=mkfs_erofs, available=True, details="mock")
+        if mkfs_erofs is not None
+        else _missing_tool("mkfs.erofs")
+    )
+    build_image_tool = (
+        ToolInfo(name="build_image", path=build_image, available=True, details="mock")
+        if build_image is not None
+        else _missing_tool("build_image")
+    )
     host = _host_linux() if kvm_accessible else dataclasses.replace(_host_linux(), kvm_accessible=False)
     return Capabilities(
         host=host,
@@ -107,6 +125,9 @@ def _caps(
         avbtool=_missing_tool("avbtool"),
         lz4=_missing_tool("lz4"),
         mke2fs=mke2fs_tool,
+        fsck_erofs=fsck_erofs_tool,
+        mkfs_erofs=mkfs_erofs_tool,
+        build_image=build_image_tool,
         launch_cvd=launch_cvd_tool,
     )
 
@@ -1200,6 +1221,84 @@ class AutoBackendTests(unittest.TestCase):
             joined = " ".join(plan.spec.errors)
             self.assertIn("launch_cvd", joined)
             self.assertIn("android-cuttlefish", joined)
+
+
+class VendorPatchTests(unittest.TestCase):
+    """Tests for wiring vendorpatch.patch_vendor_image into the QEMU backend."""
+
+    def _make_qemu_bin(self, tmpdir: str) -> Path:
+        p = Path(tmpdir) / "qemu-system-x86_64"
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        return p
+
+    def _plan(self, raw: str, patched_vendor: Path | None, patch_warning: str | None):
+        product_dir = _make_boot_img_product_with_kernel_version(Path(raw), "5.10.160-android12")
+        product = inventory_product_out(product_dir)
+        qemu_bin = self._make_qemu_bin(raw)
+        original_vendor = product.vendor
+        patched = patched_vendor
+
+        def fake_patch(
+            vendor_image: Path,
+            fstab_filename: str,
+            misc_device: str,
+            aosp_root: Path | None,
+            product_out: Path | None,
+            fsck_erofs: ToolInfo,
+            mkfs_erofs: ToolInfo,
+            build_image: ToolInfo,
+        ) -> tuple[Path | None, str | None]:
+            self.assertEqual(vendor_image, original_vendor)
+            self.assertEqual(fstab_filename, "fstab.qemu")
+            self.assertEqual(misc_device, "/dev/block/by-name/misc")
+            return patched, patch_warning
+
+        return fake_patch, QemuBackend().plan(
+            product,
+            LaunchOptions(backend="qemu"),
+            _caps(
+                emulator=None,
+                qemu=qemu_bin,
+                fsck_erofs=Path(raw) / "fsck.erofs",
+                mkfs_erofs=Path(raw) / "mkfs.erofs",
+                build_image=Path(raw) / "build_image",
+            ),
+            accel=_tcg(),
+        )
+
+    def test_patched_vendor_substituted_on_success(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            envsetup = Path(raw) / "build" / "envsetup.sh"
+            envsetup.parent.mkdir(parents=True)
+            envsetup.write_text("")
+            patched_vendor = Path(raw) / "patched_vendor.img"
+            patched_vendor.write_bytes(b"PATCHED")
+            fake_patch, spec = self._plan(raw, patched_vendor, None)
+            with unittest.mock.patch("backends.qemu.patch_vendor_image", side_effect=fake_patch):
+                spec = self._plan(raw, patched_vendor, None)[1]
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            vendor_drives = [v for v in drive_values if "patched_vendor.img" in v]
+            self.assertEqual(len(vendor_drives), 1)
+            self.assertFalse(
+                any("vendor.img will not be patched" in w for w in spec.warnings)
+            )
+
+    def test_original_vendor_used_when_patch_returns_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            envsetup = Path(raw) / "build" / "envsetup.sh"
+            envsetup.parent.mkdir(parents=True)
+            envsetup.write_text("")
+            fake_patch, spec = self._plan(raw, None, "patch unavailable")
+            with unittest.mock.patch("backends.qemu.patch_vendor_image", side_effect=fake_patch):
+                spec = self._plan(raw, None, "patch unavailable")[1]
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            vendor_drives = [v for v in drive_values if "vendor.img" in v]
+            self.assertEqual(len(vendor_drives), 1)
+            self.assertNotIn("patched_vendor.img", vendor_drives[0])
+            self.assertTrue(any("patch unavailable" in w for w in spec.warnings))
 
 
 if __name__ == "__main__":

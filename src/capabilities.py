@@ -80,6 +80,9 @@ class Capabilities:
     avbtool: ToolInfo
     lz4: ToolInfo
     mke2fs: ToolInfo
+    fsck_erofs: ToolInfo
+    mkfs_erofs: ToolInfo
+    build_image: ToolInfo
     diagnostics: list[str] = field(default_factory=list)
     launch_cvd: ToolInfo = field(
         default_factory=lambda: ToolInfo(name="launch_cvd", path=None, available=False)
@@ -194,9 +197,12 @@ def discover_tools(
     avbtool = _find_aosp_host_tool("avbtool", which_fn, env, product_out, is_file_fn)
     lz4 = _find_aosp_host_tool("lz4", which_fn, env, product_out, is_file_fn)
     mke2fs = _find_aosp_host_tool("mke2fs", which_fn, env, product_out, is_file_fn)
+    fsck_erofs = _find_aosp_host_tool("fsck.erofs", which_fn, env, product_out, is_file_fn)
+    mkfs_erofs = _find_aosp_host_tool("mkfs.erofs", which_fn, env, product_out, is_file_fn)
+    build_image = _find_aosp_host_tool("build_image", which_fn, env, product_out, is_file_fn)
     launch_cvd = _tool_from_which("launch_cvd", which_fn, extra_names=("cvd",))
 
-    for tool in (emulator, qemu, emulator_check, unpack_bootimg, lpunpack, simg2img, avbtool, lz4, mke2fs):
+    for tool in (emulator, qemu, emulator_check, unpack_bootimg, lpunpack, simg2img, avbtool, lz4, mke2fs, fsck_erofs, mkfs_erofs, build_image):
         if not tool.available:
             diagnostics.append(tool.error or f"{tool.name} not found")
     return Capabilities(
@@ -210,6 +216,9 @@ def discover_tools(
         avbtool=avbtool,
         lz4=lz4,
         mke2fs=mke2fs,
+        fsck_erofs=fsck_erofs,
+        mkfs_erofs=mkfs_erofs,
+        build_image=build_image,
         diagnostics=diagnostics,
         launch_cvd=launch_cvd,
     )
