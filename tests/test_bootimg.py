@@ -523,6 +523,43 @@ class DetectHardwarePropertyTests(unittest.TestCase):
         self.assertEqual(detect_hardware_property(None, ""), "qemu")
 
 
+class DetectFstabSuffixTests(unittest.TestCase):
+    def test_prefers_ext4_over_f2fs(self) -> None:
+        from bootimg import detect_fstab_suffix
+
+        with tempfile.TemporaryDirectory() as raw:
+            vendor_etc = Path(raw) / "vendor" / "etc"
+            vendor_etc.mkdir(parents=True)
+            (vendor_etc / "fstab.cf.f2fs.cts").write_text("f2fs\n")
+            (vendor_etc / "fstab.cf.ext4.cts").write_text("ext4\n")
+            self.assertEqual(detect_fstab_suffix(raw), "cf.ext4.cts")
+
+    def test_lexicographic_tie_within_same_fstype(self) -> None:
+        from bootimg import detect_fstab_suffix
+
+        with tempfile.TemporaryDirectory() as raw:
+            vendor_etc = Path(raw) / "vendor" / "etc"
+            vendor_etc.mkdir(parents=True)
+            (vendor_etc / "fstab.cf.ext4.hctr2").write_text("hctr2\n")
+            (vendor_etc / "fstab.cf.ext4.cts").write_text("cts\n")
+            self.assertEqual(detect_fstab_suffix(raw), "cf.ext4.cts")
+
+    def test_returns_none_when_vendor_etc_missing(self) -> None:
+        from bootimg import detect_fstab_suffix
+
+        with tempfile.TemporaryDirectory() as raw:
+            self.assertIsNone(detect_fstab_suffix(raw))
+
+    def test_returns_none_when_no_fstab_files(self) -> None:
+        from bootimg import detect_fstab_suffix
+
+        with tempfile.TemporaryDirectory() as raw:
+            vendor_etc = Path(raw) / "vendor" / "etc"
+            vendor_etc.mkdir(parents=True)
+            (vendor_etc / "other.txt").write_text("other\n")
+            self.assertIsNone(detect_fstab_suffix(raw))
+
+
 class BootconfigTrailerTests(unittest.TestCase):
     def test_trailer_checksum_is_additive_byte_sum(self) -> None:
         from bootimg import _finish_bootconfig_trailer
