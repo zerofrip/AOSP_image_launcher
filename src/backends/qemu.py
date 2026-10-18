@@ -744,6 +744,22 @@ class QemuBackend(Backend):
             f"virtio-gpu-pci,addr=0x{gpu_slot:x}",
         ]
 
+        # vhost-vsock PCI device: the Cuttlefish Lights HAL
+        # (android.hardware.light-service.cuttlefish) binds an AF_VSOCK
+        # listener in the guest and aborts if no vsock transport exists,
+        # crash-looping and wedging system_server in LightsService's
+        # constructor until the native Watchdog kills it. The guest kernel
+        # already loads vmw_vsock_virtio_transport.ko (the virtio-vsock
+        # driver); only this QEMU-side device is missing. Fixed guest-cid=3
+        # (minimum valid, non-reserved CID) matches the project's
+        # single-instance assumption; placed immediately after the GPU slot
+        # so it cannot collide with boot devices.
+        vsock_slot = gpu_slot + 1
+        argv += [
+            "-device",
+            f"vhost-vsock-pci,guest-cid=3,addr=0x{vsock_slot:x}",
+        ]
+
         # networking: prefer user-mode slirp + hostfwd for ADB, but this
         # qemu binary may have been built without libslirp (-netdev user is
         # then rejected at runtime, not at argv time). Probe compiled-in

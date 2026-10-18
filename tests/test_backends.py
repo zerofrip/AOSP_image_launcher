@@ -602,6 +602,51 @@ class GenericQemuBackendTests(unittest.TestCase):
             cmdline = spec.argv[spec.argv.index("-append") + 1]
             self.assertNotIn("virtio-gpu", cmdline)
 
+    def test_vhost_vsock_pci_device_added_after_gpu_slot(self) -> None:
+        """A vhost-vsock PCI device must be present above the virtio-gpu slot
+        so the Cuttlefish Lights HAL can bind its AF_VSOCK listener without
+        aborting, and it must not be treated as a boot device."""
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_slots: list[int] = []
+            gpu_slot: int | None = None
+            vsock_device: str | None = None
+            for i, arg in enumerate(spec.argv):
+                if arg != "-device":
+                    continue
+                value = spec.argv[i + 1]
+                if "virtio-blk-pci" in value:
+                    for part in value.split(","):
+                        if part.startswith("addr="):
+                            drive_slots.append(int(part[5:], 16))
+                elif "virtio-gpu-pci" in value:
+                    for part in value.split(","):
+                        if part.startswith("addr="):
+                            gpu_slot = int(part[5:], 16)
+                elif "vhost-vsock-pci" in value:
+                    vsock_device = value
+            self.assertIsNotNone(vsock_device)
+            assert vsock_device is not None
+            self.assertIn("guest-cid=3", vsock_device)
+            slot_parts = [p for p in vsock_device.split(",") if p.startswith("addr=")]
+            self.assertEqual(len(slot_parts), 1)
+            vsock_slot = int(slot_parts[0][5:], 16)
+            self.assertIsNotNone(gpu_slot)
+            assert gpu_slot is not None
+            self.assertGreater(vsock_slot, gpu_slot)
+            self.assertGreater(vsock_slot, max(drive_slots))
+            # vsock is not a block device: must not appear in the kernel
+            # cmdline (only the -append string is checked here).
+            cmdline = spec.argv[spec.argv.index("-append") + 1]
+            self.assertNotIn("vhost-vsock", cmdline)
+
     def test_data_drive_is_writable_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
