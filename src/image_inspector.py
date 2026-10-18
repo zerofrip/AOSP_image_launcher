@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import struct
+import subprocess
 from pathlib import Path
 
 from models import ImageInspection
@@ -108,6 +110,24 @@ def classify_bytes(header: bytes, size: int) -> tuple[str, str | None, list[str]
 def is_android_sparse(path: Path) -> bool:
     header = _read_prefix(path, 4)
     return len(header) >= 4 and struct.unpack_from("<I", header, 0)[0] == SPARSE_MAGIC
+
+
+def convert_android_sparse_image(
+    sparse_path: Path,
+    simg2img: Path,
+    output_path: Path,
+) -> Path:
+    """Convert an Android sparse image to a raw image using ``simg2img``.
+
+    The caller owns ``output_path`` and is responsible for cleaning it up.
+    Raises ``subprocess.CalledProcessError`` or ``OSError`` on failure.
+    """
+    subprocess.run(
+        [os.fspath(simg2img), os.fspath(sparse_path), os.fspath(output_path)],
+        check=True,
+        capture_output=True,
+    )
+    return output_path
 
 
 def _read_prefix(path: Path, n: int) -> bytes:

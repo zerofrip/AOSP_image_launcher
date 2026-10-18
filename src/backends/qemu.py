@@ -35,6 +35,7 @@ from bootimg import (
     read_vendor_boot_image,
 )
 from capabilities import AccelSelection, Capabilities
+from image_inspector import convert_android_sparse_image, is_android_sparse
 from models import ArtifactMapping, CommandSpec, LaunchOptions, ProductArtifacts
 from vendorpatch import patch_vendor_image
 from superimg import (
@@ -418,6 +419,42 @@ class QemuBackend(Backend):
             # remains the first drive; any position works for by-name symlinks.
             insert_idx = 1 if any(r == "metadata" for r, _ in drives) else 0
             drives.insert(insert_idx, ("misc", misc_src))
+
+        # ── sparse-to-raw conversion for per-partition drive images ──────────
+        # Real AOSP PRODUCT_OUTs sparsify ext4/f2fs images such as userdata.img
+        # by default. QEMU's raw driver cannot interpret Android sparse format,
+        # so convert any sparse drive to a real raw image before attaching it.
+        # Failures are non-fatal: warn and fall back to the original image.
+        _sparse_tmpdir: str | None = None
+        _converted_drives: list[tuple[str, Path]] = []
+        for role, src in drives:
+            if not is_android_sparse(src):
+                _converted_drives.append((role, src))
+                continue
+            if not capabilities.simg2img.available or capabilities.simg2img.path is None:
+                warnings.append(
+                    f"{src} is an Android sparse image but simg2img is not available; "
+                    "using unconverted original"
+                )
+                _converted_drives.append((role, src))
+                continue
+            try:
+                if _sparse_tmpdir is None:
+                    _sparse_tmpdir = tempfile.mkdtemp()
+                raw_path = convert_android_sparse_image(
+                    src,
+                    capabilities.simg2img.path,
+                    Path(_sparse_tmpdir) / f"{src.stem}.raw.img",
+                )
+                warnings.append(f"converted Android sparse image {src} to raw {raw_path}")
+                _converted_drives.append((role, raw_path))
+            except (OSError, subprocess.CalledProcessError) as exc:
+                warnings.append(
+                    f"could not convert Android sparse image {src}: {exc}; "
+                    "using unconverted original"
+                )
+                _converted_drives.append((role, src))
+        drives = _converted_drives
 
         # kernel + ramdisk resolution
         kernel = options.kernel or product.kernel

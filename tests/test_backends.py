@@ -77,6 +77,7 @@ def _caps(
     fsck_erofs: Path | None = None,
     mkfs_erofs: Path | None = None,
     build_image: Path | None = None,
+    simg2img: Path | None = None,
     kvm_accessible: bool = True,
 ) -> Capabilities:
     emu = (
@@ -114,6 +115,11 @@ def _caps(
         if build_image is not None
         else _missing_tool("build_image")
     )
+    simg2img_tool = (
+        ToolInfo(name="simg2img", path=simg2img, available=True, details="mock")
+        if simg2img is not None
+        else _missing_tool("simg2img")
+    )
     host = _host_linux() if kvm_accessible else dataclasses.replace(_host_linux(), kvm_accessible=False)
     return Capabilities(
         host=host,
@@ -122,7 +128,7 @@ def _caps(
         emulator_check=_missing_tool("emulator-check"),
         unpack_bootimg=_missing_tool("unpack_bootimg"),
         lpunpack=_missing_tool("lpunpack"),
-        simg2img=_missing_tool("simg2img"),
+        simg2img=simg2img_tool,
         avbtool=_missing_tool("avbtool"),
         lz4=_missing_tool("lz4"),
         mke2fs=mke2fs_tool,
@@ -1352,6 +1358,129 @@ class VendorPatchTests(unittest.TestCase):
             self.assertEqual(len(vendor_drives), 1)
             self.assertNotIn("patched_vendor.img", vendor_drives[0])
             self.assertTrue(any("patch unavailable" in w for w in spec.warnings))
+
+
+class SparseImageConversionTests(unittest.TestCase):
+    """Tests for converting Android sparse partition images before QEMU drive attachment."""
+
+    def _make_qemu_bin(self, tmpdir: str) -> Path:
+        p = Path(tmpdir) / "qemu-system-x86_64"
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        return p
+
+    def _make_simg2img_bin(self, tmpdir: str) -> Path:
+        p = Path(tmpdir) / "simg2img"
+        p.write_text(
+            "#!/bin/sh\n"
+            "# fake simg2img: copy input to output\n"
+            'cp "$1" "$2"\n'
+            "exit 0\n"
+        )
+        p.chmod(0o755)
+        return p
+
+    def test_sparse_userdata_is_converted_before_drive_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            # Make system non-sparse so only userdata needs conversion.
+            (product_dir / "system.img").write_bytes(b"\x00" * 4096)
+            userdata_path = product_dir / "userdata.img"
+            write_sparse(userdata_path)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            simg2img_bin = self._make_simg2img_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin, simg2img=simg2img_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            data_drives = [v for v in drive_values if "userdata" in v]
+            self.assertEqual(len(data_drives), 1)
+            self.assertNotIn(str(userdata_path), data_drives[0])
+            self.assertTrue(
+                any("converted Android sparse image" in w and "userdata" in w for w in spec.warnings)
+            )
+
+    def test_non_sparse_userdata_attached_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            # Make system non-sparse too; userdata is already raw.
+            (product_dir / "system.img").write_bytes(b"\x00" * 4096)
+            userdata_path = product_dir / "userdata.img"
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            # Provide a fake simg2img that would fail if called; the non-sparse
+            # path must not trigger conversion at all.
+            simg2img_bin = Path(raw) / "simg2img"
+            simg2img_bin.write_text("#!/bin/sh\nexit 1\n")
+            simg2img_bin.chmod(0o755)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin, simg2img=simg2img_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            data_drives = [v for v in drive_values if "userdata" in v]
+            self.assertEqual(len(data_drives), 1)
+            self.assertIn(str(userdata_path), data_drives[0])
+            self.assertFalse(
+                any("converted Android sparse image" in w for w in spec.warnings)
+            )
+
+    def test_sparse_userdata_fallback_when_simg2img_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            (product_dir / "system.img").write_bytes(b"\x00" * 4096)
+            userdata_path = product_dir / "userdata.img"
+            write_sparse(userdata_path)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            data_drives = [v for v in drive_values if "userdata" in v]
+            self.assertEqual(len(data_drives), 1)
+            self.assertIn(str(userdata_path), data_drives[0])
+            self.assertTrue(
+                any("simg2img is not available" in w and "userdata" in w for w in spec.warnings)
+            )
+
+    def test_sparse_userdata_fallback_when_simg2img_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            (product_dir / "system.img").write_bytes(b"\x00" * 4096)
+            userdata_path = product_dir / "userdata.img"
+            write_sparse(userdata_path)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            simg2img_bin = Path(raw) / "simg2img"
+            simg2img_bin.write_text("#!/bin/sh\nexit 1\n")
+            simg2img_bin.chmod(0o755)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin, simg2img=simg2img_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            data_drives = [v for v in drive_values if "userdata" in v]
+            self.assertEqual(len(data_drives), 1)
+            self.assertIn(str(userdata_path), data_drives[0])
+            self.assertTrue(
+                any("could not convert Android sparse image" in w and "userdata" in w for w in spec.warnings)
+            )
 
 
 if __name__ == "__main__":
