@@ -318,6 +318,7 @@ def format_diagnose_report(
         capabilities.simg2img,
         capabilities.avbtool,
         capabilities.lz4,
+        capabilities.mke2fs,
     ):
         loc = str(tool.path) if tool.path else "not found"
         lines.append(f"  {tool.name:16} {loc}")

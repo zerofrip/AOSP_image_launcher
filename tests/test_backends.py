@@ -72,6 +72,7 @@ def _caps(
     emulator: Path | None,
     qemu: Path | None = None,
     launch_cvd: Path | None = None,
+    mke2fs: Path | None = None,
     kvm_accessible: bool = True,
 ) -> Capabilities:
     emu = (
@@ -89,6 +90,11 @@ def _caps(
         if launch_cvd is not None
         else _missing_tool("launch_cvd")
     )
+    mke2fs_tool = (
+        ToolInfo(name="mke2fs", path=mke2fs, available=True, details="mock")
+        if mke2fs is not None
+        else _missing_tool("mke2fs")
+    )
     host = _host_linux() if kvm_accessible else dataclasses.replace(_host_linux(), kvm_accessible=False)
     return Capabilities(
         host=host,
@@ -100,6 +106,7 @@ def _caps(
         simg2img=_missing_tool("simg2img"),
         avbtool=_missing_tool("avbtool"),
         lz4=_missing_tool("lz4"),
+        mke2fs=mke2fs_tool,
         launch_cvd=launch_cvd_tool,
     )
 
@@ -797,6 +804,53 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertIn(b"MOD_PCI", initrd)
             self.assertIn(b"MOD_BLK", initrd)
             self.assertIn(b"lib/modules/5.10.160-android12/modules.load", initrd)
+
+    def test_native_path_synthesizes_metadata_when_mke2fs_available(self) -> None:
+        """When PRODUCT_OUT has no metadata.img and mke2fs is available,
+        the QEMU backend synthesizes a 16MiB empty ext4 image, attaches it
+        as the first drive, and injects the matching fstab line."""
+
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            mke2fs_bin = Path(raw) / "mke2fs"
+            mke2fs_bin.write_text(
+                "#!/bin/sh\n"
+                "# fake mke2fs: stamp the target file and exit successfully\n"
+                'shift $(($# - 1))\n'
+                'target="$1"\n'
+                'printf "FAKEEXT4" | dd of="$target" bs=1 count=8 conv=notrunc 2>/dev/null\n'
+                "exit 0\n"
+            )
+            mke2fs_bin.chmod(0o755)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin, mke2fs=mke2fs_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            self.assertIn("metadata", spec.mapping.roles)
+            metadata_path = Path(spec.mapping.roles["metadata"])
+            self.assertNotIn(str(product_dir), str(metadata_path))
+            self.assertEqual(metadata_path.stat().st_size, 16 * 1024 * 1024)
+            # metadata must be the first drive and not marked read-only
+            drive_values = [
+                spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"
+            ]
+            self.assertTrue(drive_values)
+            self.assertIn("metadata", drive_values[0])
+            self.assertNotIn("readonly=on", drive_values[0])
+            # the injected fstab must contain the metadata line
+            initrd_path = Path(spec.argv[spec.argv.index("-initrd") + 1])
+            initrd = initrd_path.read_bytes()
+            self.assertIn(
+                b"/dev/block/by-name/metadata /metadata ext4 "
+                b"noatime,nosuid,nodev,wait,first_stage_mount,formattable",
+                initrd,
+            )
 
 
 class AutoBackendTests(unittest.TestCase):

@@ -758,6 +758,10 @@ def build_partition_map_and_fstab(
                 lines.append(
                     f"{device} /data {fstype} noatime,nosuid,nodev,check,formattable wait,first_stage_mount"
                 )
+        elif name == "metadata":
+            lines.append(
+                f"{device} {mount_point} ext4 noatime,nosuid,nodev,wait,first_stage_mount,formattable"
+            )
         else:
             for fstype in ("erofs", "ext4"):
                 lines.append(

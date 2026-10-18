@@ -11,10 +11,10 @@ Python 3.11+, standard library only. Commands are built as argv lists (`shell=Tr
 | Family | Detection | This launcher |
 | --- | --- | --- |
 | `emulator_ranchu` | `kernel-ranchu` / `kernel-ranchu-64`, `advancedFeatures.ini`, `ro.hardware=ranchu`/`goldfish`, `emu64x`, `sdk_phone*` | Android Emulator only, and only when kernel + ramdisk + `system.img` are present |
-| `cuttlefish` | `vsoc_*`, `aosp_cf_*`, board `cutf`, `super.img` + `vendor_boot.img` | QEMU backend via native boot.img/vendor_boot.img/super.img parsing (same path as `unknown`). First-stage boot and all Treble dynamic partitions verified; `/data` mount (virtual-A/B SnapshotManager) is a known gap. `launch_cvd` remains the full-featured path. |
+| `cuttlefish` | `vsoc_*`, `aosp_cf_*`, board `cutf`, `super.img` + `vendor_boot.img` | QEMU backend via native boot.img/vendor_boot.img/super.img parsing (same path as `unknown`). First-stage boot and all Treble dynamic partitions verified; `/metadata` is auto-synthesized as a writable empty ext4 image when `mke2fs` is available, and the virtual-A/B SnapshotManager `/data` mount path is no longer a known gap. `launch_cvd` remains the full-featured path. |
 | unknown / conflicting | mixed or missing evidence | Refused (`bootable=False`) |
 
-**Cuttlefish is now supported by the QEMU backend in v1.** It uses the same native parsing path as generic `unknown` builds: `boot.img`/`init_boot.img`/`vendor_boot.img` are parsed natively, a synthetic `/fstab.<hardware>` plus `androidboot.partition_map`/`androidboot.boot_devices` is injected, dynamic partitions are extracted from `super.img` via the stdlib-only liblp parser, and first-stage init mounts `system`, `vendor`, `product`, `system_ext`, `odm`, `vendor_dlkm`, and `odm_dlkm`. Graphics, vsock, and other crosvm/`launch_cvd`-specific services are not emulated. `/data`/`userdata` mount currently fails with a virtual-A/B SnapshotManager error and reboots cleanly there; use `launch_cvd` for a fully working userspace.
+**Cuttlefish is now supported by the QEMU backend in v1.** It uses the same native parsing path as generic `unknown` builds: `boot.img`/`init_boot.img`/`vendor_boot.img` are parsed natively, a synthetic `/fstab.<hardware>` plus `androidboot.partition_map`/`androidboot.boot_devices` is injected, dynamic partitions are extracted from `super.img` via the stdlib-only liblp parser, and first-stage init mounts `system`, `vendor`, `product`, `system_ext`, `odm`, `vendor_dlkm`, and `odm_dlkm`. Graphics, vsock, and other crosvm/`launch_cvd`-specific services are not emulated. `/metadata` is now synthesized automatically as a writable empty ext4 image when `mke2fs` is available, resolving the previous virtual-A/B SnapshotManager `/data` mount failure; use `launch_cvd` for a fully working userspace.
 
 **QEMU backend is fail-closed for `emulator_ranchu` only.** ranchu needs goldfish devices the stock qemu binary does not provide. `cuttlefish` now uses the same native-parsing path as `unknown`. Missing kernel/initrd/cmdline evidence also refuses. `super.img` / dynamic partitions still refuse outright for `emulator_ranchu`; for `unknown` and `cuttlefish` they are extracted natively (see below).
 
@@ -197,7 +197,7 @@ make build-aosp AOSP_ROOT=/path/to/android-latest-release
 
 The build uses a fixed Bash script with the lunch target and build targets passed as positional arguments; it does not concatenate user values into shell source. `PRODUCT_OUT` must resolve below `<AOSP_ROOT>/out/target/product`. `--build-target` may be repeated when a narrower AOSP target is intentionally required; the default `droid` build is the supported path.
 
-Do not build `vsoc_x86_64` for the Android Emulator backend. The QEMU backend now supports Cuttlefish first-stage boot via the native parsing path above, but `/data` mounting remains a known gap; use `launch_cvd` for a fully functional Cuttlefish device (graphics, vsock, etc.).
+Do not build `vsoc_x86_64` for the Android Emulator backend. The QEMU backend now supports Cuttlefish first-stage boot via the native parsing path above, `/metadata` is synthesized automatically when `mke2fs` is available, and the previous `/data` mount gap is resolved; use `launch_cvd` for a fully functional Cuttlefish device (graphics, vsock, etc.).
 
 Defaults: `--backend auto`, `--memory 4096` (legacy `4G` is accepted), `--cpus min(4, host)`, `--adb-port 5555`, `--accel auto`.
 
@@ -470,7 +470,7 @@ CI (`.github/workflows/ci.yml`) runs compile + unittest on Ubuntu and Windows, P
 | --- | --- |
 | `AmbiguousProductOutError` | Several `out/target/product/*` dirs; pass `--product-out` or `--target` |
 | `guest architecture is not x86_64` | This tree is x86_64-only |
-| Cuttlefish `bootable=False` | With `--backend auto` this still recommends `launch_cvd`. With `--backend qemu`, check that `qemu-system-x86_64` is on PATH and that `system.img` or a parseable `super.img` is present; `/data` mount is a known gap. Use `launch_cvd` for full functionality. |
+| Cuttlefish `bootable=False` | With `--backend auto` this still recommends `launch_cvd`. With `--backend qemu`, check that `qemu-system-x86_64` is on PATH and that `system.img` or a parseable `super.img` is present; `/metadata` is synthesized automatically when `mke2fs` is available. Use `launch_cvd` for full functionality. |
 | ranchu `emulator not found` | Put `emulator` on `PATH`, set `ANDROID_SDK_ROOT`, or use an AOSP tree with `prebuilts/android-emulator/` |
 | `--accel whpx` on WSL | Linux ELF qemu/emulator cannot use WHPX |
 | `--extra-arg` error | Pass `--allow-extra-args` |

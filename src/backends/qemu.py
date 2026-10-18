@@ -351,6 +351,43 @@ class QemuBackend(Backend):
             if src is not None:
                 drives.append((role, src))
 
+        # ── synthetic /metadata image (Cuttlefish/generic native path) ──────
+        # Real Cuttlefish PRODUCT_OUT never ships a standalone metadata.img;
+        # launch_cvd synthesizes one on the fly. Do the same here so first-stage
+        # init's SnapshotManager has a writable, empty /metadata partition.
+        metadata_src = product.optional_images.get("metadata")
+        _metadata_tmpdir: str | None = None
+        if metadata_src is None:
+            if capabilities.mke2fs.available and capabilities.mke2fs.path is not None:
+                try:
+                    _metadata_tmpdir = tempfile.mkdtemp()
+                    metadata_path = Path(_metadata_tmpdir) / "metadata.img"
+                    metadata_path.write_bytes(b"\x00" * (16 * 1024 * 1024))
+                    subprocess.run(
+                        [
+                            str(capabilities.mke2fs.path),
+                            "-t", "ext4",
+                            "-b", "4096",
+                            "-L", "metadata",
+                            str(metadata_path),
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                    metadata_src = metadata_path
+                    warnings.append(
+                        f"synthesized empty /metadata image at {metadata_src}"
+                    )
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    warnings.append(f"could not synthesize /metadata image: {exc}")
+                    metadata_src = None
+            else:
+                warnings.append(
+                    "mke2fs not found; /metadata partition will not be available"
+                )
+        if metadata_src is not None:
+            drives.insert(0, ("metadata", metadata_src))
+
         # kernel + ramdisk resolution
         kernel = options.kernel or product.kernel
         ramdisk = options.ramdisk or product.ramdisk
@@ -556,6 +593,8 @@ class QemuBackend(Backend):
             drive_id = f"drive{index}"
             drv = f"file={src},format={fmt},if=none,id={drive_id}"
             if role == "system" and options.writable_system:
+                pass
+            elif role == "metadata":
                 pass
             else:
                 drv += ",readonly=on"

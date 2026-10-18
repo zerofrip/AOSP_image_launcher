@@ -386,6 +386,26 @@ class CpioAndFstabTests(unittest.TestCase):
                 self.assertIn(" ro ", f" {line} ")
                 self.assertNotIn("formattable", line)
 
+    def test_build_partition_map_and_fstab_metadata_is_formattable_and_not_ro(self) -> None:
+        """The metadata role must get a single ext4 line with the exact
+        flag string verified against real Cuttlefish boot testing."""
+        from bootimg import build_partition_map_and_fstab
+
+        partition_map, _fstab_name, fstab_text = build_partition_map_and_fstab(
+            ["metadata", "system", "vendor", "data"]
+        )
+        self.assertIn("vda,metadata", partition_map)
+        metadata_lines = [line for line in fstab_text.splitlines() if "/metadata " in line]
+        self.assertEqual(len(metadata_lines), 1, "expected exactly one metadata fstab line")
+        line = metadata_lines[0]
+        self.assertIn(
+            "/dev/block/by-name/metadata /metadata ext4 noatime,nosuid,nodev,wait,first_stage_mount,formattable",
+            line,
+        )
+        self.assertNotIn(" ro ", f" {line} ")
+        # No erofs candidate should be emitted for metadata.
+        self.assertNotIn("/metadata erofs", fstab_text)
+
     def test_build_partition_map_custom_hardware_name(self) -> None:
         from bootimg import build_partition_map_and_fstab
         _pm, fstab_name, _text = build_partition_map_and_fstab(["system"], hardware="cf")

@@ -202,5 +202,46 @@ class Lz4DiscoveryTests(unittest.TestCase):
         self.assertTrue(any("lz4" in d for d in caps.diagnostics))
 
 
+class Mke2fsDiscoveryTests(unittest.TestCase):
+    def test_mke2fs_found_on_path(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda name: "/sbin/mke2fs" if name == "mke2fs" else None,
+            is_file=lambda _path: True,
+        )
+        self.assertTrue(caps.mke2fs.available)
+        self.assertEqual(caps.mke2fs.path, Path("/sbin/mke2fs"))
+        self.assertEqual(caps.mke2fs.details, "PATH")
+
+    def test_mke2fs_found_in_aosp_host_out(self) -> None:
+        caps = discover_tools(
+            environ={"ANDROID_HOST_OUT": "/aosp/out/host/linux-x86"},
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/mke2fs",
+        )
+        self.assertTrue(caps.mke2fs.available)
+        self.assertEqual(caps.mke2fs.path, Path("/aosp/out/host/linux-x86/bin/mke2fs"))
+        self.assertEqual(caps.mke2fs.details, "ANDROID_HOST_OUT/bin")
+
+    def test_mke2fs_found_under_product_out(self) -> None:
+        caps = discover_tools(
+            environ={},
+            product_out=Path("/aosp/out/target/product/generic_x86_64"),
+            which=lambda _name: None,
+            is_file=lambda path: str(path) == "/aosp/out/host/linux-x86/bin/mke2fs",
+        )
+        self.assertTrue(caps.mke2fs.available)
+        self.assertEqual(caps.mke2fs.path, Path("/aosp/out/host/linux-x86/bin/mke2fs"))
+
+    def test_mke2fs_missing_reported_in_diagnostics(self) -> None:
+        caps = discover_tools(
+            environ={},
+            which=lambda _name: None,
+            is_file=lambda _path: False,
+        )
+        self.assertFalse(caps.mke2fs.available)
+        self.assertTrue(any("mke2fs" in d for d in caps.diagnostics))
+
+
 if __name__ == "__main__":
     unittest.main()
