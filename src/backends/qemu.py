@@ -393,7 +393,14 @@ class QemuBackend(Backend):
         ramdisk = options.ramdisk or product.ramdisk
         _boot_cmdline: str = ""
         _tmpdir: str | None = None
-        if kernel is None or ramdisk is None:
+        # Prefer the native boot.img parser whenever product.boot is available,
+        # unless the user explicitly supplied both --kernel and --ramdisk to
+        # bypass it. A real AOSP product may ship standalone kernel/ramdisk.img
+        # convenience files alongside boot.img/vendor_boot.img/init_boot.img;
+        # the native path is the only one that produces a combined initrd with
+        # the synthetic fstab, partition_map, and virtio-module injection.
+        explicit_kernel_and_ramdisk = options.kernel is not None and options.ramdisk is not None
+        if product.boot is not None and not explicit_kernel_and_ramdisk:
             boot_img = product.boot
             # ── Native boot.img parser (preferred, no external tools) ────────────
             _native_tmpdir: str | None = None
@@ -495,8 +502,13 @@ class QemuBackend(Backend):
                     assert boot_sec.kernel is not None
                     kernel_tmp.write_bytes(boot_sec.kernel)
                     ramdisk_tmp.write_bytes(combined_bytes)
-                    kernel = kernel or kernel_tmp
-                    ramdisk = ramdisk or ramdisk_tmp
+                    # Prefer the native-parsed result over the plain
+                    # product.kernel/product.ramdisk fallback, but respect an
+                    # explicit --kernel or --ramdisk option if only one was
+                    # supplied (the full explicit-override escape hatch skips
+                    # this block entirely when both are supplied).
+                    kernel = kernel_tmp if options.kernel is None else kernel
+                    ramdisk = ramdisk_tmp if options.ramdisk is None else ramdisk
                     _boot_cmdline = boot_cmdline
                 except Exception:
                     pass
@@ -536,6 +548,19 @@ class QemuBackend(Backend):
                 )
             if errors:
                 return _fail(self, capabilities, errors, warnings, ignored, reasons)
+
+        # A product with no boot.img at all may still be missing kernel or
+        # ramdisk after the fallback above; catch that case here.
+        if kernel is None:
+            errors.append(
+                "missing kernel: provide --kernel or a PRODUCT_OUT with kernel or boot.img + unpack_bootimg"
+            )
+        if ramdisk is None:
+            errors.append(
+                "missing ramdisk/initrd: provide --ramdisk or a PRODUCT_OUT with ramdisk or boot.img + unpack_bootimg"
+            )
+        if errors:
+            return _fail(self, capabilities, errors, warnings, ignored, reasons)
 
         # if we already have cross-family errors (vendor_boot/super.img/extra_args), bail
         if errors:

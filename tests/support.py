@@ -150,11 +150,19 @@ def _make_vendor_boot_img_v4(*, ramdisk_data: bytes, bootconfig_data: bytes) -> 
     return data
 
 
-def make_boot_img_product(root: Path, name: str = "boot_img_x86_64") -> Path:
+def make_boot_img_product(
+    root: Path,
+    name: str = "boot_img_x86_64",
+    *,
+    with_kernel: bool = False,
+    with_ramdisk: bool = False,
+) -> Path:
     """Synthetic generic x86_64 PRODUCT_OUT that only has boot*.img images.
 
-    No standalone kernel or ramdisk.img; the QEMU backend must parse the
-    boot image files natively to produce a bootable command line.
+    By default there is no standalone kernel or ramdisk.img; the QEMU backend
+    must parse the boot image files natively to produce a bootable command
+    line. Set ``with_kernel`` / ``with_ramdisk`` to also write the standalone
+    files a real AOSP Cuttlefish PRODUCT_OUT ships alongside boot*.img.
     """
 
     product = root / name
@@ -176,6 +184,10 @@ def make_boot_img_product(root: Path, name: str = "boot_img_x86_64") -> Path:
     write_sparse(product / "system.img")
     write_sparse(product / "vendor.img")
     write_bytes(product / "userdata.img", b"\x00" * 64)
+    if with_kernel:
+        write_elf(product / "kernel", "x86_64")
+    if with_ramdisk:
+        write_bytes(product / "ramdisk.img", b"\x1f\x8b" + b"\x00" * 8)
     write_text(
         product / "build.prop",
         "ro.product.cpu.abi=x86_64\nro.product.name=boot_img_x86_64\n",

@@ -323,6 +323,75 @@ class QemuBackendTests(unittest.TestCase):
             self.assertIn("-initrd", spec.argv)
             self.assertNotIn("vendor_boot", " ".join(spec.argv))
 
+    def test_cuttlefish_prefers_native_boot_path_over_standalone_kernel(self) -> None:
+        """A real AOSP Cuttlefish PRODUCT_OUT ships both standalone
+        kernel/ramdisk.img convenience files and proper boot*.img images. The
+        native boot.img parser must be preferred so the synthetic fstab,
+        partition_map, and virtio-module injection actually run."""
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_boot_img_product(
+                Path(raw), "cuttlefish_x86_64", with_kernel=True, with_ramdisk=True
+            )
+            product = inventory_product_out(product_dir)
+            product.family = "cuttlefish"
+            assert product.kernel is not None
+            assert product.ramdisk is not None
+            qemu_bin = Path(raw) / "qemu-system-x86_64"
+            qemu_bin.write_text("#!/bin/sh\n")
+            qemu_bin.chmod(0o755)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            kernel_idx = spec.argv.index("-kernel") + 1
+            initrd_idx = spec.argv.index("-initrd") + 1
+            # Native path writes kernel/initrd into a tempfile, not product_dir
+            self.assertNotIn(str(product_dir), spec.argv[kernel_idx])
+            self.assertNotIn(str(product_dir), spec.argv[initrd_idx])
+            self.assertNotEqual(Path(spec.argv[initrd_idx]), product.ramdisk)
+            # The native path injects androidboot.partition_map into the cmdline
+            cmdline = " ".join(spec.argv)
+            self.assertIn("androidboot.partition_map", cmdline)
+            self.assertNotIn(str(product.vendor_boot), cmdline)
+            self.assertNotIn(str(product.init_boot), cmdline)
+
+    def test_explicit_kernel_and_ramdisk_bypasses_native_boot_path(self) -> None:
+        """A user who passes both --kernel and --ramdisk explicitly must still
+        bypass boot.img parsing entirely."""
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_boot_img_product(
+                Path(raw), "cuttlefish_x86_64", with_kernel=True, with_ramdisk=True
+            )
+            product = inventory_product_out(product_dir)
+            product.family = "cuttlefish"
+            qemu_bin = Path(raw) / "qemu-system-x86_64"
+            qemu_bin.write_text("#!/bin/sh\n")
+            qemu_bin.chmod(0o755)
+            explicit_kernel = Path(raw) / "mykernel"
+            explicit_ramdisk = Path(raw) / "myramdisk"
+            explicit_kernel.write_bytes(b"EKERNEL")
+            explicit_ramdisk.write_bytes(b"ERAMDISK")
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(
+                    backend="qemu",
+                    kernel=explicit_kernel,
+                    ramdisk=explicit_ramdisk,
+                ),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            kernel_idx = spec.argv.index("-kernel") + 1
+            initrd_idx = spec.argv.index("-initrd") + 1
+            self.assertEqual(Path(spec.argv[kernel_idx]), explicit_kernel)
+            self.assertEqual(Path(spec.argv[initrd_idx]), explicit_ramdisk)
+            # Bypass means no synthetic partition_map/fstab cmdline injection
+            self.assertNotIn("androidboot.partition_map", " ".join(spec.argv))
+
     def test_emulator_ranchu_still_refused(self) -> None:
         """ranchu/goldfish must keep being refused by the QEMU backend."""
         with tempfile.TemporaryDirectory() as raw:
