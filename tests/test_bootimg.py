@@ -365,6 +365,27 @@ class CpioAndFstabTests(unittest.TestCase):
             elif "/system " in line or "/vendor " in line:
                 self.assertIn(" ro ", f" {line} ")
 
+    def test_build_partition_map_and_fstab_data_is_formattable(self) -> None:
+        """The data role must include check+formattable so an unformatted
+        userdata.img auto-formats on first boot instead of crashing init."""
+        from bootimg import build_partition_map_and_fstab
+
+        _partition_map, _fstab_name, fstab_text = build_partition_map_and_fstab(
+            ["system", "vendor", "data"]
+        )
+        data_lines = [line for line in fstab_text.splitlines() if "/data " in line]
+        self.assertEqual(len(data_lines), 2, "expected f2fs + ext4 data lines")
+        for line in data_lines:
+            self.assertIn("check", line)
+            self.assertIn("formattable", line)
+            self.assertIn("noatime,nosuid,nodev,check,formattable", line)
+            self.assertIn("wait,first_stage_mount", line)
+        # Non-data roles must remain read-only and must not pick up formattable.
+        for line in fstab_text.splitlines():
+            if "/data " not in line and "/dev/block/by-name/" in line:
+                self.assertIn(" ro ", f" {line} ")
+                self.assertNotIn("formattable", line)
+
     def test_build_partition_map_custom_hardware_name(self) -> None:
         from bootimg import build_partition_map_and_fstab
         _pm, fstab_name, _text = build_partition_map_and_fstab(["system"], hardware="cf")

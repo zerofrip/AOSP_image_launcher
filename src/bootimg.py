@@ -736,8 +736,11 @@ def build_partition_map_and_fstab(
     correctly if the *same* order is used for both.
 
     The special name "data" gets read-write f2fs/ext4 candidate fstab
-    lines; everything else gets read-only erofs/ext4 candidate lines (the
-    two most common Android partition filesystem types — fs_mgr tries each
+    lines with the "check,formattable" flags so a fresh userdata.img that
+    has not been pre-formatted (the normal state of a newly-built image)
+    is auto-formatted on first boot instead of causing fs_mgr to abort;
+    everything else gets read-only erofs/ext4 candidate lines (the two
+    most common Android partition filesystem types — fs_mgr tries each
     listed fs_type in turn until one mounts).
     """
 
@@ -753,7 +756,7 @@ def build_partition_map_and_fstab(
         if name == "data":
             for fstype in ("f2fs", "ext4"):
                 lines.append(
-                    f"{device} /data {fstype} noatime,nosuid,nodev wait,first_stage_mount"
+                    f"{device} /data {fstype} noatime,nosuid,nodev,check,formattable wait,first_stage_mount"
                 )
         else:
             for fstype in ("erofs", "ext4"):
