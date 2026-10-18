@@ -399,7 +399,7 @@ class CpioAndFstabTests(unittest.TestCase):
         self.assertEqual(len(metadata_lines), 1, "expected exactly one metadata fstab line")
         line = metadata_lines[0]
         self.assertIn(
-            "/dev/block/by-name/metadata /metadata ext4 noatime,nosuid,nodev,wait,first_stage_mount,formattable",
+            "/dev/block/by-name/metadata /metadata ext4 noatime,nosuid,nodev wait,first_stage_mount,formattable",
             line,
         )
         self.assertNotIn(" ro ", f" {line} ")

@@ -950,7 +950,7 @@ class GenericQemuBackendTests(unittest.TestCase):
             initrd = initrd_path.read_bytes()
             self.assertIn(
                 b"/dev/block/by-name/metadata /metadata ext4 "
-                b"noatime,nosuid,nodev,wait,first_stage_mount,formattable",
+                b"noatime,nosuid,nodev wait,first_stage_mount,formattable",
                 initrd,
             )
 
