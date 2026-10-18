@@ -450,6 +450,31 @@ class QemuBackend(Backend):
             insert_idx = 1 if any(r == "metadata" for r, _ in drives) else 0
             drives.insert(insert_idx, ("misc", misc_src))
 
+        # ── synthetic /frp image (Cuttlefish/generic native path) ────────────
+        # AOSP's PersistentDataBlockService (phase 500) opens the raw block
+        # device named by ro.frp.pst (=/dev/block/by-name/frp in real
+        # Cuttlefish vendor builds) and init-timeout-crash-loops system_server
+        # when the node cannot be opened. Synthesize a small, empty raw image
+        # the same way as /misc; no filesystem or fstab entry is needed — the
+        # service reads/writes it directly as a raw block device.
+        frp_src = product.optional_images.get("frp")
+        _frp_tmpdir: str | None = None
+        if frp_src is None:
+            try:
+                _frp_tmpdir = tempfile.mkdtemp()
+                frp_path = Path(_frp_tmpdir) / "frp.img"
+                frp_path.write_bytes(b"\x00" * (1 * 1024 * 1024))
+                frp_src = frp_path
+                warnings.append(
+                    f"synthesized empty /frp image at {frp_src}"
+                )
+            except OSError as exc:
+                warnings.append(f"could not synthesize /frp image: {exc}")
+                frp_src = None
+        if frp_src is not None:
+            # Any position works for by-name symlinks; keep it after metadata.
+            drives.append(("frp", frp_src))
+
         # ── sparse-to-raw conversion for per-partition drive images ──────────
         # Real AOSP PRODUCT_OUTs sparsify ext4/f2fs images such as userdata.img
         # by default. QEMU's raw driver cannot interpret Android sparse format,
@@ -801,7 +826,7 @@ class QemuBackend(Backend):
             drv = f"file={src},format={fmt},if=none,id={drive_id}"
             if role == "system" and options.writable_system:
                 pass
-            elif role in ("data", "metadata", "misc") and not options.read_only:
+            elif role in ("data", "metadata", "misc", "frp") and not options.read_only:
                 pass
             else:
                 drv += ",readonly=on"

@@ -1351,6 +1351,90 @@ class MiscPartitionSynthesisTests(unittest.TestCase):
             )
 
 
+class FrpPartitionSynthesisTests(unittest.TestCase):
+    """Tests for the synthetic /frp image needed by PersistentDataBlockService."""
+
+    def _make_qemu_bin(self, tmpdir: str) -> Path:
+        p = Path(tmpdir) / "qemu-system-x86_64"
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        return p
+
+    def _plan(self, raw: str):
+        version = "5.10.160-android12"
+        product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+        product = inventory_product_out(product_dir)
+        qemu_bin = self._make_qemu_bin(raw)
+        spec = QemuBackend().plan(
+            product,
+            LaunchOptions(backend="qemu"),
+            _caps(emulator=None, qemu=qemu_bin),
+            accel=_tcg(),
+        )
+        return spec, product_dir
+
+    def test_native_path_synthesizes_frp_image(self) -> None:
+        """When PRODUCT_OUT has no frp.img, the QEMU backend synthesizes a 1MiB
+        empty raw image, attaches it writable, and lists it in partition_map."""
+        with tempfile.TemporaryDirectory() as raw:
+            spec, product_dir = self._plan(raw)
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            self.assertIn("frp", spec.mapping.roles)
+            frp_path = Path(spec.mapping.roles["frp"])
+            self.assertNotIn(str(product_dir), str(frp_path))
+            self.assertEqual(frp_path.stat().st_size, 1 * 1024 * 1024)
+            drive_values = [
+                spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"
+            ]
+            frp_drives = [v for v in drive_values if "frp" in v]
+            self.assertEqual(len(frp_drives), 1)
+            self.assertNotIn("readonly=on", frp_drives[0])
+            # androidboot.partition_map must give it a by-name entry matching
+            # ro.frp.pst=/dev/block/by-name/frp.
+            append_idx = spec.argv.index("-append")
+            cmdline = spec.argv[append_idx + 1]
+            self.assertIn("partition_map", cmdline)
+            self.assertIn(",frp", cmdline)
+            self.assertTrue(
+                any("synthesized empty /frp image" in w for w in spec.warnings)
+            )
+
+    def test_frp_synthesis_warns_when_image_cannot_be_created(self) -> None:
+        """A failure to create the synthetic frp image must warn, not error."""
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            bad_dir = Path(raw) / "badfrp"
+            bad_dir.mkdir()
+            bad_dir.chmod(0o555)
+            call_count = 0
+            real_mkdtemp = tempfile.mkdtemp
+
+            def fake_mkdtemp(*args, **kwargs) -> str:
+                nonlocal call_count
+                call_count += 1
+                # The first mkdtemp call is for /misc; the second is for /frp.
+                if call_count in (1, 2):
+                    return str(bad_dir)
+                return real_mkdtemp(*args, **kwargs)
+
+            with unittest.mock.patch("backends.qemu.tempfile.mkdtemp", side_effect=fake_mkdtemp):
+                spec = QemuBackend().plan(
+                    product,
+                    LaunchOptions(backend="qemu"),
+                    _caps(emulator=None, qemu=qemu_bin),
+                    accel=_tcg(),
+                )
+            bad_dir.chmod(0o755)
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            self.assertNotIn("frp", spec.mapping.roles)
+            self.assertTrue(
+                any("could not synthesize /frp image" in w for w in spec.warnings)
+            )
+
+
 class SlotSuffixDefaultTests(unittest.TestCase):
     """Tests for the default A/B slot suffix used when no super.img is present."""
 

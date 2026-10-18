@@ -850,6 +850,10 @@ def build_partition_map_and_fstab(
             lines.append(
                 f"{device} /misc emmc defaults defaults"
             )
+        elif name == "frp":
+            # Raw FRP partition read/written directly by
+            # PersistentDataBlockService; no fstab entry at all.
+            pass
         else:
             for fstype in ("erofs", "ext4"):
                 lines.append(
