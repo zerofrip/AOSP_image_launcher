@@ -429,6 +429,39 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertNotIn("super.img", " ".join(spec.argv))
             self.assertEqual(spec.errors, [])
 
+    def test_data_drive_is_writable_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            data_drives = [v for v in drive_values if "userdata" in v]
+            self.assertEqual(len(data_drives), 1)
+            self.assertNotIn("readonly=on", data_drives[0])
+            system_drives = [v for v in drive_values if "system" in v]
+            self.assertEqual(len(system_drives), 1)
+            self.assertIn("readonly=on", system_drives[0])
+
+    def test_data_drive_becomes_read_only_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu", read_only=True),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"]
+            data_drives = [v for v in drive_values if "userdata" in v]
+            self.assertEqual(len(data_drives), 1)
+            self.assertIn("readonly=on", data_drives[0])
+
     def test_missing_qemu_executable_not_bootable(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             product = inventory_product_out(make_generic_x86_64_product(Path(raw)))

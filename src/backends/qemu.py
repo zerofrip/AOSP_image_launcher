@@ -594,7 +594,7 @@ class QemuBackend(Backend):
             drv = f"file={src},format={fmt},if=none,id={drive_id}"
             if role == "system" and options.writable_system:
                 pass
-            elif role == "metadata":
+            elif role in ("data", "metadata") and not options.read_only:
                 pass
             else:
                 drv += ",readonly=on"
