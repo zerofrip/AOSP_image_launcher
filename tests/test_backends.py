@@ -1239,6 +1239,28 @@ class SlotSuffixDefaultTests(unittest.TestCase):
             cmdline = spec.argv[spec.argv.index("-append") + 1]
             self.assertIn("androidboot.slot_suffix=_a", cmdline)
 
+    def test_native_path_emits_nonzero_vsock_lights_port(self) -> None:
+        """The native boot path must set androidboot.vsock_lights_port to a
+        non-zero value so the Cuttlefish Lights HAL does not abort binding a
+        vsock listener on port 0."""
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            cmdline = spec.argv[spec.argv.index("-append") + 1]
+            match = re.search(r"androidboot\.vsock_lights_port=(\d+)", cmdline)
+            self.assertIsNotNone(match, msg=cmdline)
+            assert match is not None
+            self.assertNotEqual(match.group(1), "0")
+
 
 class AutoBackendTests(unittest.TestCase):
     def test_auto_ranchu_uses_emulator(self) -> None:

@@ -591,6 +591,11 @@ class QemuBackend(Backend):
                             f"androidboot.partition_map={partition_map}",
                             f"androidboot.boot_devices={boot_devices}",
                             f"androidboot.slot_suffix={slot_suffix}",
+                            # The vhost-vsock-pci device is attached
+                            # unconditionally, so the Lights HAL needs a
+                            # non-zero vsock port or VsockServer::new() panics
+                            # on bind to port 0 and crash-loops the HAL.
+                            "androidboot.vsock_lights_port=12345",
                         ] if s.strip()
                     )
 
