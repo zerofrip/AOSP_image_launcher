@@ -144,6 +144,40 @@ def patch_vendor_image(
         fstab_path = fstab_dir / fstab_filename
         fstab_path.write_text(f"{misc_device} /misc emmc defaults defaults\n", encoding="utf-8")
 
+        # Inject graphics HAL property overrides so ANGLE + SwiftShader are
+        # selected when the build ships them but does not already set these
+        # properties. Never duplicate or override an existing key.
+        build_prop_path = extract_dir / "build.prop"
+        build_prop_text = ""
+        if build_prop_path.is_file():
+            try:
+                build_prop_text = build_prop_path.read_text(encoding="utf-8")
+            except OSError:
+                build_prop_text = ""
+        present_keys = set()
+        for line in build_prop_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                present_keys.add(line.split("=", 1)[0].strip())
+        additions = [
+            f"{key}={value}"
+            for key, value in (
+                ("ro.hardware.egl", "angle"),
+                ("ro.hardware.vulkan", "pastel"),
+            )
+            if key not in present_keys
+        ]
+        if additions:
+            try:
+                with build_prop_path.open("a", encoding="utf-8") as bp:
+                    if build_prop_text and not build_prop_text.endswith("\n"):
+                        bp.write("\n")
+                    bp.write("\n".join(additions) + "\n")
+            except OSError as exc:
+                return None, f"could not patch vendor.img build.prop: {exc}"
+
         prop_path = _build_properties_file(aosp_root, product_out, workdir)
 
         output_path = workdir / "vendor.img"

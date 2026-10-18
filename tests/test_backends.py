@@ -428,7 +428,7 @@ class QemuBackendTests(unittest.TestCase):
 
 
 def _make_aosp_virtio_module_tree(root: Path, version: str) -> Path:
-    """Create a fake AOSP ``system_dlkm_staging`` tree with the 4 virtio modules."""
+    """Create a fake AOSP module tree with storage and virtio-gpu modules."""
 
     mod_dir = (
         root
@@ -458,6 +458,19 @@ def _make_aosp_virtio_module_tree(root: Path, version: str) -> Path:
     )
     (mod_dir / "modules.alias").write_text("alias virtio_pci virtio_pci\n")
     (mod_dir / "modules.softdep").write_text("softdep data\n")
+
+    gpu_dir = (
+        root
+        / "kernel"
+        / "prebuilts"
+        / "common-modules"
+        / "virtual-device"
+        / version
+        / "x86-64"
+    )
+    gpu_dir.mkdir(parents=True)
+    (gpu_dir / "virtio_dma_buf.ko").write_bytes(b"MOD_GPU_DMA")
+    (gpu_dir / "virtio-gpu.ko").write_bytes(b"MOD_GPU")
     return root
 
 
@@ -544,6 +557,42 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
             cpu_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-cpu"]
             self.assertEqual(cpu_values, ["host"])
+
+    def test_virtio_gpu_pci_device_added_after_highest_drive_slot(self) -> None:
+        """A 2D virtio-gpu PCI device must be present above all virtio-blk
+        drive slots so the guest kernel gets a DRM node for gralloc/minigbm
+        without the GPU being treated as a boot device."""
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            drive_slots: list[int] = []
+            gpu_device: str | None = None
+            for i, arg in enumerate(spec.argv):
+                if arg != "-device":
+                    continue
+                value = spec.argv[i + 1]
+                if "virtio-blk-pci" in value:
+                    for part in value.split(","):
+                        if part.startswith("addr="):
+                            drive_slots.append(int(part[5:], 16))
+                elif "virtio-gpu-pci" in value:
+                    gpu_device = value
+            self.assertIsNotNone(gpu_device)
+            assert gpu_device is not None
+            gpu_slot_parts = [p for p in gpu_device.split(",") if p.startswith("addr=")]
+            self.assertEqual(len(gpu_slot_parts), 1)
+            gpu_slot = int(gpu_slot_parts[0][5:], 16)
+            self.assertGreater(gpu_slot, max(drive_slots))
+            # The GPU is not a block device and must not appear in the
+            # kernel cmdline (only the -append string is checked here).
+            cmdline = spec.argv[spec.argv.index("-append") + 1]
+            self.assertNotIn("virtio-gpu", cmdline)
 
     def test_data_drive_is_writable_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -952,6 +1001,8 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertIn(b"MOD_LEGACY", initrd)
             self.assertIn(b"MOD_PCI", initrd)
             self.assertIn(b"MOD_BLK", initrd)
+            self.assertIn(b"MOD_GPU_DMA", initrd)
+            self.assertIn(b"MOD_GPU", initrd)
             self.assertIn(b"lib/modules/5.10.160-android12/modules.load", initrd)
 
     def test_native_path_synthesizes_metadata_when_mke2fs_available(self) -> None:

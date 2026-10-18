@@ -795,6 +795,18 @@ class BuildVirtioModulesRamdiskTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             aosp_root = self._make_module_tree(raw, "5.10.160-android12")
+            gpu_dir = (
+                aosp_root
+                / "kernel"
+                / "prebuilts"
+                / "common-modules"
+                / "virtual-device"
+                / "5.10.160-android12"
+                / "x86-64"
+            )
+            gpu_dir.mkdir(parents=True)
+            (gpu_dir / "virtio_dma_buf.ko").write_bytes(b"MOD_GPU_DMA")
+            (gpu_dir / "virtio-gpu.ko").write_bytes(b"MOD_GPU")
             cpio, warning = build_virtio_modules_ramdisk(
                 aosp_root, "5.10.160-android12", architecture="x86_64"
             )
@@ -820,6 +832,8 @@ class BuildVirtioModulesRamdiskTests(unittest.TestCase):
             self.assertIn(b"MOD_MODERN", cpio)
             self.assertIn(b"MOD_PCI", cpio)
             self.assertIn(b"MOD_BLK", cpio)
+            self.assertIn(b"MOD_GPU_DMA", cpio)
+            self.assertIn(b"MOD_GPU", cpio)
             self.assertIn(b"modules.dep", cpio)
             self.assertIn(b"modules.alias", cpio)
             self.assertIn(b"modules.softdep", cpio)
@@ -828,6 +842,8 @@ class BuildVirtioModulesRamdiskTests(unittest.TestCase):
                 "kernel/drivers/virtio/virtio_pci_modern_dev.ko\n"
                 "kernel/drivers/virtio/virtio_pci.ko\n"
                 "kernel/drivers/block/virtio_blk.ko\n"
+                "virtio_dma_buf.ko\n"
+                "virtio-gpu.ko\n"
             ).encode("utf-8")
             self.assertIn(expected_load, cpio)
 
@@ -859,3 +875,83 @@ class BuildVirtioModulesRamdiskTests(unittest.TestCase):
             self.assertIn("incomplete", warning.lower())
             self.assertIn("virtio_pci.ko", warning)
             self.assertIn("virtio_blk.ko", warning)
+
+    def _make_gpu_module_tree(
+        self,
+        aosp_root: Path,
+        version: str,
+        *,
+        missing: set[str] | None = None,
+    ) -> Path:
+        missing = missing or set()
+        gpu_dir = (
+            aosp_root
+            / "kernel"
+            / "prebuilts"
+            / "common-modules"
+            / "virtual-device"
+            / version
+            / "x86-64"
+        )
+        gpu_dir.mkdir(parents=True)
+        modules = {
+            "virtio_dma_buf.ko": b"MOD_GPU_DMA",
+            "virtio-gpu.ko": b"MOD_GPU",
+        }
+        for name, content in modules.items():
+            if name in missing:
+                continue
+            (gpu_dir / name).write_bytes(content)
+        return aosp_root
+
+    def test_gpu_modules_appended_in_load_order_when_present(self) -> None:
+        from bootimg import build_virtio_modules_ramdisk
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = self._make_module_tree(raw, "5.10.160-android12")
+            self._make_gpu_module_tree(aosp_root, "5.10.160-android12")
+            cpio, warning = build_virtio_modules_ramdisk(
+                aosp_root, "5.10.160-android12", architecture="x86_64"
+            )
+            self.assertIsNone(warning)
+            self.assertIn(b"MOD_GPU_DMA", cpio)
+            self.assertIn(b"MOD_GPU", cpio)
+            self.assertIn(b"virtio_dma_buf.ko", cpio)
+            self.assertIn(b"virtio-gpu.ko", cpio)
+            expected_load = (
+                "kernel/drivers/virtio/virtio_pci_legacy_dev.ko\n"
+                "kernel/drivers/virtio/virtio_pci_modern_dev.ko\n"
+                "kernel/drivers/virtio/virtio_pci.ko\n"
+                "kernel/drivers/block/virtio_blk.ko\n"
+                "virtio_dma_buf.ko\n"
+                "virtio-gpu.ko\n"
+            ).encode("utf-8")
+            self.assertIn(expected_load, cpio)
+
+    def test_missing_gpu_module_directory_warns_and_returns_base_cpio(self) -> None:
+        from bootimg import build_virtio_modules_ramdisk
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = self._make_module_tree(raw, "5.10.160-android12")
+            cpio, warning = build_virtio_modules_ramdisk(
+                aosp_root, "5.10.160-android12", architecture="x86_64"
+            )
+            self.assertTrue(cpio.startswith(b"070701"))
+            self.assertIn(b"MOD_BLK", cpio)
+            self.assertIsNotNone(warning)
+            self.assertIn("virtio-gpu module directory not found", warning)
+
+    def test_missing_gpu_module_file_warns_and_returns_base_cpio(self) -> None:
+        from bootimg import build_virtio_modules_ramdisk
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = self._make_module_tree(raw, "5.10.160-android12")
+            self._make_gpu_module_tree(aosp_root, "5.10.160-android12", missing={"virtio-gpu.ko"})
+            cpio, warning = build_virtio_modules_ramdisk(
+                aosp_root, "5.10.160-android12", architecture="x86_64"
+            )
+            self.assertTrue(cpio.startswith(b"070701"))
+            self.assertIn(b"MOD_BLK", cpio)
+            self.assertIsNotNone(warning)
+            self.assertIn("virtio-gpu modules missing", warning)
+            self.assertIn("virtio-gpu.ko", warning)

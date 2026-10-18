@@ -225,6 +225,11 @@ class PatchVendorImageWorkflowTests(unittest.TestCase):
             extract_dir = Path(extract_arg.split("=", 1)[1])
             extract_dir.mkdir(parents=True, exist_ok=True)
             (extract_dir / "existing.txt").write_text("hello", encoding="utf-8")
+            (extract_dir / "build.prop").write_text(
+                "ro.product.board=cutf\n"
+                "ro.hardware=cutf_cvm\n",
+                encoding="utf-8",
+            )
         elif op == "build_image":
             # argv: [build_image, extract_dir, prop_file, output, product_out]
             output = Path(argv[3])
@@ -323,6 +328,168 @@ class PatchVendorImageWorkflowTests(unittest.TestCase):
             self.assertIsNotNone(warning)
             self.assertIn("build_image", warning)
             self.assertIn("build failed", warning)
+
+    def test_build_prop_lines_appended_when_absent(self) -> None:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as raw:
+            vendor = Path(raw) / "vendor.img"
+            _make_erofs_image(vendor)
+            fsck = Path(raw) / "fsck.erofs"
+            mkfs = Path(raw) / "mkfs.erofs"
+            build = Path(raw) / "build_image"
+            for p in (fsck, mkfs, build):
+                p.write_text("#!/bin/sh\n")
+                p.chmod(0o755)
+
+            captured_props: list[str] = []
+
+            def fake_run(argv, **_kwargs):
+                op = Path(argv[0]).name
+                if op == "fsck.erofs":
+                    extract_arg = argv[1]
+                    extract_dir = Path(extract_arg.split("=", 1)[1])
+                    extract_dir.mkdir(parents=True, exist_ok=True)
+                    (extract_dir / "build.prop").write_text(
+                        "ro.hardware=cutf_cvm\n", encoding="utf-8"
+                    )
+                elif op == "build_image":
+                    extract_dir = Path(argv[1])
+                    build_prop = extract_dir / "build.prop"
+                    if build_prop.exists():
+                        captured_props.append(build_prop.read_text(encoding="utf-8"))
+                    output = Path(argv[3])
+                    output.write_bytes(b"PATCHED_VENDOR")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with unittest.mock.patch("vendorpatch.subprocess.run", side_effect=fake_run):
+                patched, warning = patch_vendor_image(
+                    vendor,
+                    "fstab.qemu",
+                    "/dev/block/by-name/misc",
+                    Path(raw) / "aosp",
+                    Path(raw) / "product",
+                    fsck_erofs=_tool(fsck, "fsck.erofs"),
+                    mkfs_erofs=_tool(mkfs, "mkfs.erofs"),
+                    build_image=_tool(build, "build_image"),
+                )
+            self.assertIsNotNone(patched)
+            self.assertIsNone(warning)
+            self.assertEqual(len(captured_props), 1)
+            text = captured_props[0]
+            self.assertIn("ro.hardware=cutf_cvm", text)
+            self.assertIn("ro.hardware.egl=angle", text)
+            self.assertIn("ro.hardware.vulkan=pastel", text)
+            self.assertEqual(text.count("ro.hardware.egl="), 1)
+            self.assertEqual(text.count("ro.hardware.vulkan="), 1)
+
+    def test_build_prop_lines_not_duplicated_when_present(self) -> None:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as raw:
+            vendor = Path(raw) / "vendor.img"
+            _make_erofs_image(vendor)
+            fsck = Path(raw) / "fsck.erofs"
+            mkfs = Path(raw) / "mkfs.erofs"
+            build = Path(raw) / "build_image"
+            for p in (fsck, mkfs, build):
+                p.write_text("#!/bin/sh\n")
+                p.chmod(0o755)
+
+            captured_props: list[str] = []
+
+            def fake_run(argv, **_kwargs):
+                op = Path(argv[0]).name
+                if op == "fsck.erofs":
+                    extract_arg = argv[1]
+                    extract_dir = Path(extract_arg.split("=", 1)[1])
+                    extract_dir.mkdir(parents=True, exist_ok=True)
+                    (extract_dir / "build.prop").write_text(
+                        "ro.hardware.egl=angle\n"
+                        "ro.hardware.vulkan=pastel\n"
+                        "ro.hardware=cutf_cvm\n",
+                        encoding="utf-8",
+                    )
+                elif op == "build_image":
+                    extract_dir = Path(argv[1])
+                    build_prop = extract_dir / "build.prop"
+                    if build_prop.exists():
+                        captured_props.append(build_prop.read_text(encoding="utf-8"))
+                    output = Path(argv[3])
+                    output.write_bytes(b"PATCHED_VENDOR")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with unittest.mock.patch("vendorpatch.subprocess.run", side_effect=fake_run):
+                patched, warning = patch_vendor_image(
+                    vendor,
+                    "fstab.qemu",
+                    "/dev/block/by-name/misc",
+                    Path(raw) / "aosp",
+                    Path(raw) / "product",
+                    fsck_erofs=_tool(fsck, "fsck.erofs"),
+                    mkfs_erofs=_tool(mkfs, "mkfs.erofs"),
+                    build_image=_tool(build, "build_image"),
+                )
+            self.assertIsNotNone(patched)
+            self.assertIsNone(warning)
+            self.assertEqual(len(captured_props), 1)
+            text = captured_props[0]
+            self.assertEqual(text.count("ro.hardware.egl="), 1)
+            self.assertEqual(text.count("ro.hardware.vulkan="), 1)
+            self.assertIn("ro.hardware=cutf_cvm", text)
+
+    def test_build_prop_appends_only_missing_key(self) -> None:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as raw:
+            vendor = Path(raw) / "vendor.img"
+            _make_erofs_image(vendor)
+            fsck = Path(raw) / "fsck.erofs"
+            mkfs = Path(raw) / "mkfs.erofs"
+            build = Path(raw) / "build_image"
+            for p in (fsck, mkfs, build):
+                p.write_text("#!/bin/sh\n")
+                p.chmod(0o755)
+
+            captured_props: list[str] = []
+
+            def fake_run(argv, **_kwargs):
+                op = Path(argv[0]).name
+                if op == "fsck.erofs":
+                    extract_arg = argv[1]
+                    extract_dir = Path(extract_arg.split("=", 1)[1])
+                    extract_dir.mkdir(parents=True, exist_ok=True)
+                    (extract_dir / "build.prop").write_text(
+                        "ro.hardware.egl=angle\n",
+                        encoding="utf-8",
+                    )
+                elif op == "build_image":
+                    extract_dir = Path(argv[1])
+                    build_prop = extract_dir / "build.prop"
+                    if build_prop.exists():
+                        captured_props.append(build_prop.read_text(encoding="utf-8"))
+                    output = Path(argv[3])
+                    output.write_bytes(b"PATCHED_VENDOR")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with unittest.mock.patch("vendorpatch.subprocess.run", side_effect=fake_run):
+                patched, warning = patch_vendor_image(
+                    vendor,
+                    "fstab.qemu",
+                    "/dev/block/by-name/misc",
+                    Path(raw) / "aosp",
+                    Path(raw) / "product",
+                    fsck_erofs=_tool(fsck, "fsck.erofs"),
+                    mkfs_erofs=_tool(mkfs, "mkfs.erofs"),
+                    build_image=_tool(build, "build_image"),
+                )
+            self.assertIsNotNone(patched)
+            self.assertIsNone(warning)
+            self.assertEqual(len(captured_props), 1)
+            text = captured_props[0]
+            self.assertEqual(text.count("ro.hardware.egl="), 1)
+            self.assertIn("ro.hardware.vulkan=pastel", text)
+            self.assertEqual(text.count("ro.hardware.vulkan="), 1)
 
 
 if __name__ == "__main__":

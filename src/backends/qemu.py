@@ -696,6 +696,17 @@ class QemuBackend(Backend):
             ]
             roles[role] = str(src)
 
+        # virtio-gpu PCI device: gives the guest kernel a DRM device node that
+        # gralloc/minigbm requires for graphics buffer allocation, even when
+        # all rendering is done in userspace by ANGLE + SwiftShader. 2D
+        # virtio-gpu is sufficient; place it immediately after the highest
+        # virtio-blk drive slot so it does not collide with boot devices.
+        gpu_slot = pci_slots[-1] + 1
+        argv += [
+            "-device",
+            f"virtio-gpu-pci,addr=0x{gpu_slot:x}",
+        ]
+
         # networking: prefer user-mode slirp + hostfwd for ADB, but this
         # qemu binary may have been built without libslirp (-netdev user is
         # then rejected at runtime, not at argv time). Probe compiled-in

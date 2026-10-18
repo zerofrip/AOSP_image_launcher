@@ -583,13 +583,20 @@ def build_virtio_modules_ramdisk(
     * the four ``.ko`` files at their real relative paths,
     * ``modules.dep``, ``modules.alias``, ``modules.softdep`` copied as-is,
     * a generated ``modules.load`` listing the four modules in dependency
-      order (parsed from ``modules.dep``).
+      order (parsed from ``modules.dep``), optionally followed by the
+      virtio-gpu/virtio_dma_buf modules from the separate
+      ``common-modules/virtual-device`` prebuilt tree.
 
     If the directory or any required file/module is missing, returns
     ``(b"", warning)`` so the caller can log the warning and continue
     without blocking boot. A partial module set is treated as a failure:
     injecting an incomplete, guaranteed-to-fail set is worse than skipping.
+    The optional virtio-gpu modules degrade gracefully: if their directory
+    or either module is missing, the base storage modules are still bundled
+    and a warning is returned.
     """
+
+    warning: str | None = None
 
     if not kernel_version:
         return b"", "kernel version is empty; cannot locate virtio modules"
@@ -632,15 +639,63 @@ def build_virtio_modules_ramdisk(
         return b"", f"could not determine virtio module dependency order in {mod_dir}"
 
     entries: list[tuple[str, bytes]] = []
+
     for name in _VIRTIO_MODULE_NAMES:
         rel = rel_paths[name]
         entries.append((f"lib/modules/{kernel_version}/{rel}", found[name].read_bytes()))
+
     for name in meta_files:
         entries.append((f"lib/modules/{kernel_version}/{name}", (mod_dir / name).read_bytes()))
-    load_content = "\n".join(ordered) + "\n"
+
+    load_lines = list(ordered)
+
+    # Optional virtio-gpu DRM modules from the separate common-modules
+    # virtual-device prebuilt tree. They depend only on each other
+    # (virtio-gpu.ko depends on virtio_dma_buf.ko) and load after storage.
+    gpu_dir = (
+        aosp
+        / "kernel"
+        / "prebuilts"
+        / "common-modules"
+        / "virtual-device"
+        / kernel_version
+        / "x86-64"
+    )
+    gpu_modules = ("virtio_dma_buf.ko", "virtio-gpu.ko")
+    if gpu_dir.is_dir():
+        gpu_found: dict[str, Path] = {}
+        for path in gpu_dir.rglob("*.ko"):
+            if path.name in gpu_modules:
+                gpu_found[path.name] = path
+        gpu_missing = sorted(set(gpu_modules) - set(gpu_found.keys()))
+        if gpu_missing:
+            warning = (
+                f"virtio-gpu modules missing ({gpu_missing}) in {gpu_dir}; "
+                "continuing without GPU kernel module support"
+            )
+        else:
+            try:
+                for name in gpu_modules:
+                    rel = str(gpu_found[name].relative_to(gpu_dir))
+                    entries.append(
+                        (f"lib/modules/{kernel_version}/{rel}", gpu_found[name].read_bytes())
+                    )
+                    load_lines.append(rel)
+            except OSError as exc:
+                warning = (
+                    f"could not read virtio-gpu modules from {gpu_dir}: {exc}; "
+                    "continuing without GPU kernel module support"
+                )
+    else:
+        warning = (
+            f"virtio-gpu module directory not found at {gpu_dir}; "
+            "continuing without GPU kernel module support"
+        )
+
+    load_content = "\n".join(load_lines) + "\n"
     entries.append((f"lib/modules/{kernel_version}/modules.load", load_content.encode("utf-8")))
 
-    return pack_cpio_newc(entries), None
+    return pack_cpio_newc(entries), warning
 
 
 def pack_cpio_newc(entries: list[tuple[str, bytes]]) -> bytes:
