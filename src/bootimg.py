@@ -739,9 +739,12 @@ def build_partition_map_and_fstab(
     lines with the "check,formattable" flags so a fresh userdata.img that
     has not been pre-formatted (the normal state of a newly-built image)
     is auto-formatted on first boot instead of causing fs_mgr to abort;
-    everything else gets read-only erofs/ext4 candidate lines (the two
-    most common Android partition filesystem types — fs_mgr tries each
-    listed fs_type in turn until one mounts).
+    the special name "metadata" gets a single writable ext4 line; the
+    special name "misc" gets a single raw emmc line used by BootControl to
+    locate the bootloader_message block; everything else gets read-only
+    erofs/ext4 candidate lines (the two most common Android partition
+    filesystem types — fs_mgr tries each listed fs_type in turn until one
+    mounts).
     """
 
     device_letters = [chr(ord("a") + i) for i in range(len(roles))]
@@ -761,6 +764,10 @@ def build_partition_map_and_fstab(
         elif name == "metadata":
             lines.append(
                 f"{device} {mount_point} ext4 noatime,nosuid,nodev wait,first_stage_mount,formattable"
+            )
+        elif name == "misc":
+            lines.append(
+                f"{device} /misc emmc defaults defaults"
             )
         else:
             for fstype in ("erofs", "ext4"):

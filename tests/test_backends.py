@@ -955,6 +955,140 @@ class GenericQemuBackendTests(unittest.TestCase):
             )
 
 
+class MiscPartitionSynthesisTests(unittest.TestCase):
+    """Tests for synthetic /misc image needed by BootControl / Boot HAL."""
+
+    def _make_qemu_bin(self, tmpdir: str) -> Path:
+        p = Path(tmpdir) / "qemu-system-x86_64"
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        return p
+
+    def test_native_path_synthesizes_misc_image(self) -> None:
+        """When PRODUCT_OUT has no misc.img, the QEMU backend synthesizes a
+        1MiB empty raw image, attaches it writable, and injects the matching
+        fstab line."""
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            self.assertIn("misc", spec.mapping.roles)
+            misc_path = Path(spec.mapping.roles["misc"])
+            self.assertNotIn(str(product_dir), str(misc_path))
+            self.assertEqual(misc_path.stat().st_size, 1 * 1024 * 1024)
+            drive_values = [
+                spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-drive"
+            ]
+            misc_drives = [v for v in drive_values if "misc" in v]
+            self.assertEqual(len(misc_drives), 1)
+            self.assertNotIn("readonly=on", misc_drives[0])
+            # the injected fstab must contain the misc line
+            initrd_path = Path(spec.argv[spec.argv.index("-initrd") + 1])
+            initrd = initrd_path.read_bytes()
+            self.assertIn(
+                b"/dev/block/by-name/misc /misc emmc defaults defaults",
+                initrd,
+            )
+            self.assertTrue(
+                any("synthesized empty /misc image" in w for w in spec.warnings)
+            )
+
+    def test_misc_synthesis_warns_when_image_cannot_be_created(self) -> None:
+        """A failure to create the synthetic misc image must warn, not error."""
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            bad_dir = Path(raw) / "bad"
+            bad_dir.mkdir()
+            bad_dir.chmod(0o555)
+            call_count = 0
+            real_mkdtemp = tempfile.mkdtemp
+
+            def fake_mkdtemp() -> str:
+                nonlocal call_count
+                call_count += 1
+                # The first mkdtemp call is for /misc; later calls are for the
+                # native boot.img path's kernel/ramdisk tempfiles.
+                if call_count == 1:
+                    return str(bad_dir)
+                return real_mkdtemp()
+
+            with unittest.mock.patch("backends.qemu.tempfile.mkdtemp", side_effect=fake_mkdtemp):
+                spec = QemuBackend().plan(
+                    product,
+                    LaunchOptions(backend="qemu"),
+                    _caps(emulator=None, qemu=qemu_bin),
+                    accel=_tcg(),
+                )
+            bad_dir.chmod(0o755)
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            self.assertNotIn("misc", spec.mapping.roles)
+            self.assertTrue(
+                any("could not synthesize /misc image" in w for w in spec.warnings)
+            )
+
+    def test_native_path_uses_existing_misc_image_when_present(self) -> None:
+        """A real misc.img in optional_images must be used as-is, not replaced."""
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            misc_img = product_dir / "misc.img"
+            misc_img.write_bytes(b"REAL_MISC_IMAGE")
+            product = inventory_product_out(product_dir)
+            product.optional_images["misc"] = misc_img
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            self.assertIn("misc", spec.mapping.roles)
+            self.assertEqual(Path(spec.mapping.roles["misc"]), misc_img)
+            self.assertFalse(
+                any("synthesized empty /misc image" in w for w in spec.warnings)
+            )
+
+
+class SlotSuffixDefaultTests(unittest.TestCase):
+    """Tests for the default A/B slot suffix used when no super.img is present."""
+
+    def _make_qemu_bin(self, tmpdir: str) -> Path:
+        p = Path(tmpdir) / "qemu-system-x86_64"
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        return p
+
+    def test_native_path_emits_default_slot_suffix_a(self) -> None:
+        """A flat PRODUCT_OUT without super.img must default to slot '_a' so
+        BootControl sees a non-empty ro.boot.slot_suffix."""
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            cmdline = spec.argv[spec.argv.index("-append") + 1]
+            self.assertIn("androidboot.slot_suffix=_a", cmdline)
+
+
 class AutoBackendTests(unittest.TestCase):
     def test_auto_ranchu_uses_emulator(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -334,6 +334,12 @@ class QemuBackend(Backend):
                 vendor_dlkm = _super_sources["vendor_dlkm"]
                 odm_dlkm = _super_sources["odm_dlkm"]
 
+        # A flat, non-A/B PRODUCT_OUT has no super.img slot info, but the
+        # Boot HAL hard-requires a non-empty ro.boot.slot_suffix. Default to
+        # the standard A/B slot '_a' when no suffix was discovered above.
+        if not slot_suffix:
+            slot_suffix = "_a"
+
         if system is None:
             errors.append("missing system image: provide --system or a PRODUCT_OUT with system.img")
             return _fail(self, capabilities, errors, warnings, ignored, reasons)
@@ -387,6 +393,30 @@ class QemuBackend(Backend):
                 )
         if metadata_src is not None:
             drives.insert(0, ("metadata", metadata_src))
+
+        # ── synthetic /misc image (Cuttlefish/generic native path) ───────────
+        # Real AOSP Cuttlefish PRODUCT_OUT never ships a standalone misc.img,
+        # but BootControl requires a writable /misc partition to read and write
+        # the bootloader_message struct. Synthesize a small, empty raw image.
+        misc_src = product.optional_images.get("misc")
+        _misc_tmpdir: str | None = None
+        if misc_src is None:
+            try:
+                _misc_tmpdir = tempfile.mkdtemp()
+                misc_path = Path(_misc_tmpdir) / "misc.img"
+                misc_path.write_bytes(b"\x00" * (1 * 1024 * 1024))
+                misc_src = misc_path
+                warnings.append(
+                    f"synthesized empty /misc image at {misc_src}"
+                )
+            except OSError as exc:
+                warnings.append(f"could not synthesize /misc image: {exc}")
+                misc_src = None
+        if misc_src is not None:
+            # Place misc immediately after metadata (if present) so metadata
+            # remains the first drive; any position works for by-name symlinks.
+            insert_idx = 1 if any(r == "metadata" for r, _ in drives) else 0
+            drives.insert(insert_idx, ("misc", misc_src))
 
         # kernel + ramdisk resolution
         kernel = options.kernel or product.kernel
@@ -492,7 +522,7 @@ class QemuBackend(Backend):
                             "androidboot.force_normal_boot=1",
                             f"androidboot.partition_map={partition_map}",
                             f"androidboot.boot_devices={boot_devices}",
-                            f"androidboot.slot_suffix={slot_suffix}" if slot_suffix else "",
+                            f"androidboot.slot_suffix={slot_suffix}",
                         ] if s.strip()
                     )
 
@@ -619,7 +649,7 @@ class QemuBackend(Backend):
             drv = f"file={src},format={fmt},if=none,id={drive_id}"
             if role == "system" and options.writable_system:
                 pass
-            elif role in ("data", "metadata") and not options.read_only:
+            elif role in ("data", "metadata", "misc") and not options.read_only:
                 pass
             else:
                 drv += ",readonly=on"

@@ -406,6 +406,27 @@ class CpioAndFstabTests(unittest.TestCase):
         # No erofs candidate should be emitted for metadata.
         self.assertNotIn("/metadata erofs", fstab_text)
 
+    def test_build_partition_map_and_fstab_misc_is_raw_emmc(self) -> None:
+        """The misc role must get a single raw emmc fstab line; BootControl
+        reads/writes the bootloader_message struct directly on this partition.
+        """
+        from bootimg import build_partition_map_and_fstab
+
+        partition_map, _fstab_name, fstab_text = build_partition_map_and_fstab(
+            ["system", "misc", "vendor", "data"]
+        )
+        self.assertIn("vdb,misc", partition_map)
+        misc_lines = [line for line in fstab_text.splitlines() if "/misc " in line]
+        self.assertEqual(len(misc_lines), 1, "expected exactly one misc fstab line")
+        self.assertEqual(
+            misc_lines[0],
+            "/dev/block/by-name/misc /misc emmc defaults defaults",
+        )
+        # misc must not have filesystem candidate lines.
+        self.assertNotIn("/misc erofs", fstab_text)
+        self.assertNotIn("/misc ext4", fstab_text)
+        self.assertNotIn("/misc f2fs", fstab_text)
+
     def test_build_partition_map_custom_hardware_name(self) -> None:
         from bootimg import build_partition_map_and_fstab
         _pm, fstab_name, _text = build_partition_map_and_fstab(["system"], hardware="cf")
