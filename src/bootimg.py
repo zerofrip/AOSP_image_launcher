@@ -567,6 +567,23 @@ def _order_modules_by_deps(targets: list[str], deps: dict[str, list[str]]) -> li
     return ordered
 
 
+_KERNEL_MAJOR_MINOR_RE = re.compile(r"^(\d+\.\d+)")
+
+
+def _kernel_major_minor(kernel_version: str) -> str | None:
+    """Derive the MAJOR.MINOR kernel version directory component.
+
+    ``common-modules/virtual-device`` prebuilt trees are laid out by
+    major.minor only (e.g. ``6.12``), not by the full release string
+    (e.g. ``6.12.74-android16-6-g3ec022196c4e-ab15076761``). Returns
+    ``None`` when the version does not start with at least two dot-
+    separated numeric segments.
+    """
+
+    match = _KERNEL_MAJOR_MINOR_RE.match(kernel_version)
+    return match.group(1) if match else None
+
+
 def build_virtio_modules_ramdisk(
     aosp_root: Path,
     kernel_version: str,
@@ -652,13 +669,22 @@ def build_virtio_modules_ramdisk(
     # Optional virtio-gpu DRM modules from the separate common-modules
     # virtual-device prebuilt tree. They depend only on each other
     # (virtio-gpu.ko depends on virtio_dma_buf.ko) and load after storage.
+    # That tree is organized by MAJOR.MINOR kernel version (e.g. "6.12"),
+    # not by the full release string, so derive the directory component.
+    gpu_major_minor = _kernel_major_minor(kernel_version)
+    if gpu_major_minor is None:
+        return (
+            pack_cpio_newc(entries),
+            f"cannot derive major.minor kernel version from {kernel_version!r}; "
+            "continuing without GPU kernel module support",
+        )
     gpu_dir = (
         aosp
         / "kernel"
         / "prebuilts"
         / "common-modules"
         / "virtual-device"
-        / kernel_version
+        / gpu_major_minor
         / "x86-64"
     )
     gpu_modules = ("virtio_dma_buf.ko", "virtio-gpu.ko")

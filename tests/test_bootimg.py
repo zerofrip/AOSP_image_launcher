@@ -801,7 +801,7 @@ class BuildVirtioModulesRamdiskTests(unittest.TestCase):
                 / "prebuilts"
                 / "common-modules"
                 / "virtual-device"
-                / "5.10.160-android12"
+                / "5.10"
                 / "x86-64"
             )
             gpu_dir.mkdir(parents=True)
@@ -909,7 +909,7 @@ class BuildVirtioModulesRamdiskTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             aosp_root = self._make_module_tree(raw, "5.10.160-android12")
-            self._make_gpu_module_tree(aosp_root, "5.10.160-android12")
+            self._make_gpu_module_tree(aosp_root, "5.10")
             cpio, warning = build_virtio_modules_ramdisk(
                 aosp_root, "5.10.160-android12", architecture="x86_64"
             )
@@ -946,7 +946,7 @@ class BuildVirtioModulesRamdiskTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             aosp_root = self._make_module_tree(raw, "5.10.160-android12")
-            self._make_gpu_module_tree(aosp_root, "5.10.160-android12", missing={"virtio-gpu.ko"})
+            self._make_gpu_module_tree(aosp_root, "5.10", missing={"virtio-gpu.ko"})
             cpio, warning = build_virtio_modules_ramdisk(
                 aosp_root, "5.10.160-android12", architecture="x86_64"
             )
@@ -955,3 +955,57 @@ class BuildVirtioModulesRamdiskTests(unittest.TestCase):
             self.assertIsNotNone(warning)
             self.assertIn("virtio-gpu modules missing", warning)
             self.assertIn("virtio-gpu.ko", warning)
+
+    def test_gpu_dir_uses_major_minor_path_for_real_kernel_release(self) -> None:
+        from bootimg import _kernel_major_minor, build_virtio_modules_ramdisk
+
+        # Real case from hands-on testing: full release string used for
+        # system_dlkm_staging, but common-modules/virtual-device is laid
+        # out by major.minor only.
+        full = "6.12.74-android16-6-g3ec022196c4e-ab15076761"
+        self.assertEqual(_kernel_major_minor(full), "6.12")
+        self.assertEqual(_kernel_major_minor("6.6.30-foo"), "6.6")
+        self.assertEqual(_kernel_major_minor("6.1.5"), "6.1")
+        self.assertIsNone(_kernel_major_minor("mainline"))
+        self.assertIsNone(_kernel_major_minor(""))
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = self._make_module_tree(raw, full)
+            self._make_gpu_module_tree(aosp_root, "6.12")
+            cpio, warning = build_virtio_modules_ramdisk(
+                aosp_root, full, architecture="x86_64"
+            )
+            self.assertIsNone(warning)
+            self.assertIn(b"MOD_GPU_DMA", cpio)
+            self.assertIn(b"MOD_GPU", cpio)
+
+    def test_gpu_dir_missing_major_minor_path_warns_gracefully(self) -> None:
+        from bootimg import build_virtio_modules_ramdisk
+
+        # If the full-release path exists but major.minor does not, we
+        # must NOT find it under the full-release path anymore.
+        full = "6.12.74-android16-6-g3ec022196c4e-ab15076761"
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = self._make_module_tree(raw, full)
+            self._make_gpu_module_tree(aosp_root, full)
+            cpio, warning = build_virtio_modules_ramdisk(
+                aosp_root, full, architecture="x86_64"
+            )
+            self.assertTrue(cpio.startswith(b"070701"))
+            self.assertIn(b"MOD_BLK", cpio)
+            self.assertNotIn(b"MOD_GPU", cpio)
+            self.assertIsNotNone(warning)
+            self.assertIn("virtio-gpu module directory not found", warning)
+            self.assertIn("6.12", warning)
+            self.assertNotIn(full, warning)
+
+    def test_unversioned_kernel_warns_without_gpu_support(self) -> None:
+        from bootimg import build_virtio_modules_ramdisk
+
+        with tempfile.TemporaryDirectory() as raw:
+            aosp_root = self._make_module_tree(raw, "custom")
+            cpio, warning = build_virtio_modules_ramdisk(aosp_root, "custom")
+            self.assertTrue(cpio.startswith(b"070701"))
+            self.assertIn(b"MOD_BLK", cpio)
+            self.assertIsNotNone(warning)
+            self.assertIn("cannot derive major.minor kernel version", warning)

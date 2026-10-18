@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import tempfile
 import unittest
 import unittest.mock
@@ -465,7 +466,8 @@ def _make_aosp_virtio_module_tree(root: Path, version: str) -> Path:
         / "prebuilts"
         / "common-modules"
         / "virtual-device"
-        / version
+        # common-modules tree is laid out by major.minor kernel version
+        / (re.match(r"^(\d+\.\d+)", version).group(1) if re.match(r"^(\d+\.\d+)", version) else version)
         / "x86-64"
     )
     gpu_dir.mkdir(parents=True)
