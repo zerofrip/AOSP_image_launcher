@@ -1115,65 +1115,6 @@ class SlotSuffixDefaultTests(unittest.TestCase):
             self.assertIn("androidboot.slot_suffix=_a", cmdline)
 
 
-class FstabSuffixTests(unittest.TestCase):
-    """Tests for matching the injected ramdisk fstab filename to a real
-    vendor-staging fstab so second-stage GetFstabPath() finds it."""
-
-    def _make_qemu_bin(self, tmpdir: str) -> Path:
-        p = Path(tmpdir) / "qemu-system-x86_64"
-        p.write_text("#!/bin/sh\n")
-        p.chmod(0o755)
-        return p
-
-    def test_native_path_uses_vendor_fstab_suffix_when_staging_exists(self) -> None:
-        """When <product_out>/vendor/etc/fstab.* exists, the synthetic fstab
-        must use the chosen suffix and the cmdline must set fstab_suffix."""
-        with tempfile.TemporaryDirectory() as raw:
-            version = "5.10.160-android12"
-            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
-            vendor_etc = product_dir / "vendor" / "etc"
-            vendor_etc.mkdir(parents=True)
-            (vendor_etc / "fstab.cf.ext4.cts").write_text("# real vendor fstab\n")
-            (vendor_etc / "fstab.cf.f2fs.cts").write_text("# f2fs variant\n")
-            product = inventory_product_out(product_dir)
-            qemu_bin = self._make_qemu_bin(raw)
-            spec = QemuBackend().plan(
-                product,
-                LaunchOptions(backend="qemu"),
-                _caps(emulator=None, qemu=qemu_bin),
-                accel=_tcg(),
-            )
-            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
-            cmdline = spec.argv[spec.argv.index("-append") + 1]
-            self.assertIn("androidboot.fstab_suffix=cf.ext4.cts", cmdline)
-            initrd_path = Path(spec.argv[spec.argv.index("-initrd") + 1])
-            initrd = initrd_path.read_bytes()
-            self.assertIn(b"fstab.cf.ext4.cts\x00", initrd)
-            # The fallback hardware-based fstab name must not be injected.
-            self.assertNotIn(b"fstab.qemu\x00", initrd)
-
-    def test_native_path_unchanged_when_no_vendor_fstab_staging(self) -> None:
-        """Without a real vendor/etc/fstab.* staging tree, the existing
-        fstab.<hardware> naming and cmdline must be preserved unchanged."""
-        with tempfile.TemporaryDirectory() as raw:
-            version = "5.10.160-android12"
-            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
-            product = inventory_product_out(product_dir)
-            qemu_bin = self._make_qemu_bin(raw)
-            spec = QemuBackend().plan(
-                product,
-                LaunchOptions(backend="qemu"),
-                _caps(emulator=None, qemu=qemu_bin),
-                accel=_tcg(),
-            )
-            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
-            cmdline = spec.argv[spec.argv.index("-append") + 1]
-            self.assertNotIn("androidboot.fstab_suffix", cmdline)
-            initrd_path = Path(spec.argv[spec.argv.index("-initrd") + 1])
-            initrd = initrd_path.read_bytes()
-            self.assertIn(b"fstab.qemu\x00", initrd)
-
-
 class AutoBackendTests(unittest.TestCase):
     def test_auto_ranchu_uses_emulator(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

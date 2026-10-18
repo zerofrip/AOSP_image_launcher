@@ -780,48 +780,6 @@ def build_partition_map_and_fstab(
     return partition_map, fstab_filename, fstab_text
 
 
-def detect_fstab_suffix(product_out: Path | str | None) -> str | None:
-    """Pick a real vendor-staging fstab suffix when one is available.
-
-    Real AOSP PRODUCT_OUT directories contain the uncompressed vendor partition
-    staging tree at ``<product_out>/vendor/etc/``, including fstab files that
-    will later be packed into the real vendor.img. If usable files matching
-    ``fstab.*`` exist there, return the part after ``fstab.`` (e.g.
-    ``cf.ext4.cts``) so the synthetic fstab injected into the ramdisk can be
-    named identically to the real file.
-
-    AOSP's ``GetFstabPath()`` checks the ``fstab_suffix`` boot property before
-    ``hardware`` or ``hardware.platform``. Emitting
-    ``androidboot.fstab_suffix=<suffix>`` therefore makes first-stage init find
-    our injected ramdisk copy and second-stage init/HALs find the matching real
-    file inside the mounted vendor partition after ``switch_root``.
-
-    Preference order: an ``ext4`` variant is chosen over ``f2fs``; when several
-    files share the same fstype, the lexicographically-first suffix wins. If
-    the staging directory does not exist or contains no ``fstab.*`` files,
-    return ``None`` so callers fall back to the existing
-    ``fstab.<androidboot.hardware>`` behavior.
-    """
-
-    if not product_out:
-        return None
-    vendor_etc = Path(product_out) / "vendor" / "etc"
-    if not vendor_etc.is_dir():
-        return None
-    candidates = sorted(p.name for p in vendor_etc.glob("fstab.*") if p.is_file())
-    if not candidates:
-        return None
-
-    def _sort_key(name: str) -> tuple[int, str]:
-        suffix = name[len("fstab."):]
-        # Prefer ext4 over f2fs, then lexicographically-first suffix.
-        fstype_score = 0 if "ext4" in suffix else 1
-        return (fstype_score, suffix)
-
-    best = min(candidates, key=_sort_key)
-    return best[len("fstab."):]
-
-
 _HARDWARE_PROP_RE = re.compile(r"androidboot\.hardware\s*=\s*\"?([\w.\-]+)\"?")
 
 

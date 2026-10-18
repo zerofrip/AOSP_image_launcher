@@ -29,7 +29,6 @@ from bootimg import (
     build_partition_map_and_fstab,
     build_pci_boot_devices,
     build_virtio_modules_ramdisk,
-    detect_fstab_suffix,
     detect_hardware_property,
     pack_cpio_newc,
     read_boot_image,
@@ -468,14 +467,8 @@ class QemuBackend(Backend):
                     hardware_name = detect_hardware_property(
                         vend_sec, options.append or ""
                     )
-                    fstab_suffix = detect_fstab_suffix(product.product_out)
-                    partition_map, _, fstab_text = build_partition_map_and_fstab(
+                    partition_map, fstab_name, fstab_text = build_partition_map_and_fstab(
                         role_names, hardware=hardware_name
-                    )
-                    fstab_name = (
-                        f"fstab.{fstab_suffix}"
-                        if fstab_suffix is not None
-                        else f"fstab.{hardware_name}"
                     )
                     boot_devices, pci_slots = build_pci_boot_devices(len(drives))
                     # drives[i] gets PCI slot pci_slots[i] — the drive-building
@@ -523,16 +516,15 @@ class QemuBackend(Backend):
                         extra_ramdisk=extra_ramdisk,
                         lz4_path=str(capabilities.lz4.path) if capabilities.lz4.available else None,
                     )
-                    cmdline_parts = [
-                        boot_cmdline,
-                        "androidboot.force_normal_boot=1",
-                        f"androidboot.partition_map={partition_map}",
-                        f"androidboot.boot_devices={boot_devices}",
-                        f"androidboot.slot_suffix={slot_suffix}",
-                    ]
-                    if fstab_suffix is not None:
-                        cmdline_parts.append(f"androidboot.fstab_suffix={fstab_suffix}")
-                    boot_cmdline = " ".join(s for s in cmdline_parts if s.strip())
+                    boot_cmdline = " ".join(
+                        s for s in [
+                            boot_cmdline,
+                            "androidboot.force_normal_boot=1",
+                            f"androidboot.partition_map={partition_map}",
+                            f"androidboot.boot_devices={boot_devices}",
+                            f"androidboot.slot_suffix={slot_suffix}",
+                        ] if s.strip()
+                    )
 
                     _native_tmpdir = tempfile.mkdtemp()
                     kernel_tmp = Path(_native_tmpdir) / "kernel"
