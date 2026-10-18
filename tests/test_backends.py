@@ -31,6 +31,30 @@ from command_builder import build_launch_plan
 from models import LaunchOptions
 from product_out import inventory_product_out
 
+_sensors_responder_patch: unittest.mock._patch | None = None
+
+
+def setUpModule() -> None:
+    """Prevent plan() from spawning real sensors responder subprocesses.
+
+    Most backend tests only build an argv and never launch QEMU, so the
+    responder would retry connecting to a socket that is never created. A
+    module-level mock makes it return a harmless stand-in; the two tests that
+    explicitly exercise the responder integration override this patch.
+    """
+    global _sensors_responder_patch
+    _sensors_responder_patch = unittest.mock.patch(
+        "backends.qemu._start_sensors_handshake_responder",
+        return_value=unittest.mock.Mock(pid=12345),
+    )
+    _sensors_responder_patch.start()
+
+
+def tearDownModule() -> None:
+    if _sensors_responder_patch is not None:
+        _sensors_responder_patch.stop()
+
+
 EMULATOR_HELP = """
 Android Emulator usage:
   -sysdir <dir>
@@ -647,12 +671,14 @@ class GenericQemuBackendTests(unittest.TestCase):
             cmdline = spec.argv[spec.argv.index("-append") + 1]
             self.assertNotIn("vhost-vsock", cmdline)
 
-    def test_virtio_serial_hvc_sinks_added_after_vsock_slot(self) -> None:
+    @unittest.mock.patch("backends.qemu._start_sensors_handshake_responder")
+    def test_virtio_serial_hvc_sinks_added_after_vsock_slot(self, mock_start) -> None:
         """A virtio-serial-pci-non-transitional bus with max_ports=31 must be
         present above the vhost-vsock slot, and all 20 Cuttlefish /dev/hvcN
-        virtconsole ports (hvc0..hvc19) must be declared as null-sink-backed
-        chardev/device pairs in exact index order, so guest HALs that open
-        hardcoded /dev/hvcN nodes never get ENOENT."""
+        virtconsole ports (hvc0..hvc19) must be declared in exact index order.
+        hvc18, the sensors multihal control channel, is backed by a UNIX
+        socket chardev; every other index is a plain null sink."""
+        mock_start.return_value = unittest.mock.Mock(pid=12345)
         with tempfile.TemporaryDirectory() as raw:
             product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
             product = inventory_product_out(product_dir)
@@ -690,22 +716,74 @@ class GenericQemuBackendTests(unittest.TestCase):
             assert vsock_slot is not None
             self.assertGreater(serial_slot, vsock_slot)
             self.assertGreater(serial_slot, max(drive_slots))
-            # All 20 hvc0..hvc19 chardev/virtconsole pairs, in exact order.
-            chardev_ids: list[int] = []
+            # hvc18 is socket-backed; hvc0-17 and hvc19 are null sinks.
+            chardevs: dict[int, tuple[str, str | None]] = {}
             console_ids: list[int] = []
             for i, arg in enumerate(spec.argv):
                 if arg == "-chardev":
                     value = spec.argv[i + 1]
                     if value.startswith("null,id=hvc"):
-                        chardev_ids.append(int(value[len("null,id=hvc"):]))
+                        idx = int(value[len("null,id=hvc"):])
+                        chardevs[idx] = ("null", None)
+                    elif value.startswith("socket,id=hvc"):
+                        idx = int(value.split(",")[1][len("id=hvc"):])
+                        chardevs[idx] = ("socket", value)
                 elif arg == "-device":
                     value = spec.argv[i + 1]
                     if value.startswith("virtconsole,bus=virtio-serial.0,chardev=hvc"):
                         console_ids.append(
                             int(value[len("virtconsole,bus=virtio-serial.0,chardev=hvc"):])
                         )
-            self.assertEqual(chardev_ids, list(range(20)))
+            self.assertEqual(chardevs.keys(), set(range(20)))
+            for idx in range(20):
+                if idx == 18:
+                    self.assertEqual(chardevs[idx][0], "socket", msg=f"hvc{idx}")
+                    chardev_value = chardevs[idx][1]
+                    assert chardev_value is not None
+                    self.assertIn("server=on", chardev_value)
+                    self.assertIn("wait=off", chardev_value)
+                    self.assertIn("path=", chardev_value)
+                    self.assertNotIn(str(product_dir), chardev_value)
+                else:
+                    self.assertEqual(chardevs[idx][0], "null", msg=f"hvc{idx}")
             self.assertEqual(console_ids, list(range(20)))
+            mock_start.assert_called_once()
+
+    @unittest.mock.patch("backends.qemu._start_sensors_handshake_responder")
+    def test_hvc18_falls_back_to_null_when_handshake_helper_fails(self, mock_start) -> None:
+        """If the sensors handshake helper cannot be spawned, hvc18 must
+        degrade gracefully to a plain null sink and a warning is emitted."""
+        def fake_start(socket_path: object, warnings: list[str]) -> None:
+            warnings.append(
+                "could not start sensors handshake responder for /dev/hvc18: nope; "
+                "falling back to null sink"
+            )
+            return None
+
+        mock_start.side_effect = fake_start
+        with tempfile.TemporaryDirectory() as raw:
+            product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            self.assertTrue(
+                any(
+                    "sensors handshake responder" in w and "null sink" in w
+                    for w in spec.warnings
+                )
+            )
+            chardevs: dict[int, str] = {}
+            for i, arg in enumerate(spec.argv):
+                if arg == "-chardev":
+                    value = spec.argv[i + 1]
+                    if value.startswith("null,id=hvc"):
+                        idx = int(value[len("null,id=hvc"):])
+                        chardevs[idx] = "null"
+            self.assertEqual(chardevs, {i: "null" for i in range(20)})
 
     def test_data_drive_is_writable_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1225,14 +1303,15 @@ class MiscPartitionSynthesisTests(unittest.TestCase):
             call_count = 0
             real_mkdtemp = tempfile.mkdtemp
 
-            def fake_mkdtemp() -> str:
+            def fake_mkdtemp(*args, **kwargs) -> str:
                 nonlocal call_count
                 call_count += 1
                 # The first mkdtemp call is for /misc; later calls are for the
-                # native boot.img path's kernel/ramdisk tempfiles.
+                # sensors hvc18 socket and the native boot.img path's
+                # kernel/ramdisk tempfiles.
                 if call_count == 1:
                     return str(bad_dir)
-                return real_mkdtemp()
+                return real_mkdtemp(*args, **kwargs)
 
             with unittest.mock.patch("backends.qemu.tempfile.mkdtemp", side_effect=fake_mkdtemp):
                 spec = QemuBackend().plan(

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -80,6 +81,35 @@ def _find_aosp_root(product_out: Path | None) -> Path | None:
             break
         current = parent
     return None
+
+
+def _sensors_handshake_responder_script() -> Path:
+    """Path to the sensors multihal handshake helper script."""
+    return Path(__file__).resolve().parent.parent / "sensors_handshake_responder.py"
+
+
+def _start_sensors_handshake_responder(
+    socket_path: Path, warnings: list[str]
+) -> subprocess.Popen | None:
+    """Spawn the hvc18 handshake helper in the background.
+
+    If spawning fails for any reason, append a warning and return ``None`` so
+    the caller can fall back to a plain null sink for /dev/hvc18.
+    """
+
+    script = _sensors_handshake_responder_script()
+    try:
+        return subprocess.Popen(
+            [sys.executable, str(script), str(socket_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        warnings.append(
+            f"could not start sensors handshake responder for /dev/hvc18: {exc}; "
+            "falling back to null sink"
+        )
+        return None
 
 
 def _detect_firmware_dir(qemu_path: Path | None) -> Path | None:
@@ -456,6 +486,33 @@ class QemuBackend(Backend):
                 _converted_drives.append((role, src))
         drives = _converted_drives
 
+        # ── sensors multihal handshake responder on /dev/hvc18 ──────────────
+        # vendor.sensors-hal-multihal opens /dev/hvc18 as its control channel
+        # and blocks in a constructor-time "list-sensors" handshake. Without a
+        # reply it never registers android.hardware.sensors.ISensors/default,
+        # so system_server's SensorManager creation (called unconditionally
+        # from DeviceStateProviderImpl) blocks forever and the native Watchdog
+        # kills system_server repeatedly. Back hvc18 with a small helper that
+        # answers the single request with a zero-sensors reply and keeps the
+        # channel open for the HAL's lifetime.
+        _sensors_hvc18_tmpdir: str | None = None
+        _sensors_hvc18_socket: Path | None = None
+        _sensors_hvc18_proc: subprocess.Popen | None = None
+        try:
+            _sensors_hvc18_tmpdir = tempfile.mkdtemp(prefix="sensors_hvc18_")
+            _sensors_hvc18_socket = Path(_sensors_hvc18_tmpdir) / "hvc18.sock"
+            _sensors_hvc18_proc = _start_sensors_handshake_responder(
+                _sensors_hvc18_socket, warnings
+            )
+            if _sensors_hvc18_proc is None:
+                _sensors_hvc18_socket = None
+        except OSError as exc:
+            warnings.append(
+                f"could not create temp socket for sensors handshake responder: {exc}; "
+                "falling back to null sink for /dev/hvc18"
+            )
+            _sensors_hvc18_socket = None
+
         # kernel + ramdisk resolution
         kernel = options.kernel or product.kernel
         ramdisk = options.ramdisk or product.ramdisk
@@ -802,11 +859,22 @@ class QemuBackend(Backend):
             f"id=virtio-serial,addr=0x{serial_slot:x}",
         ]
         for hvc_index in range(20):
-            argv += [
-                "-chardev", f"null,id=hvc{hvc_index}",
-                "-device",
-                f"virtconsole,bus=virtio-serial.0,chardev=hvc{hvc_index}",
-            ]
+            if hvc_index == 18 and _sensors_hvc18_socket is not None:
+                argv += [
+                    "-chardev",
+                    (
+                        f"socket,id=hvc{hvc_index},path={_sensors_hvc18_socket},"
+                        "server=on,wait=off"
+                    ),
+                    "-device",
+                    f"virtconsole,bus=virtio-serial.0,chardev=hvc{hvc_index}",
+                ]
+            else:
+                argv += [
+                    "-chardev", f"null,id=hvc{hvc_index}",
+                    "-device",
+                    f"virtconsole,bus=virtio-serial.0,chardev=hvc{hvc_index}",
+                ]
 
         # networking: prefer user-mode slirp + hostfwd for ADB, but this
         # qemu binary may have been built without libslirp (-netdev user is
