@@ -498,6 +498,32 @@ class GenericQemuBackendTests(unittest.TestCase):
             self.assertNotIn("super.img", " ".join(spec.argv))
             self.assertEqual(spec.errors, [])
 
+    def test_cpu_max_is_emitted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product, LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable)
+            argv = spec.argv
+            self.assertIn("-cpu", argv)
+            self.assertEqual(argv[argv.index("-cpu") + 1], "max")
+
+    def test_cpu_default_skipped_when_user_supplies_cpu_extra_arg(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            product = inventory_product_out(make_generic_x86_64_product(Path(raw)))
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu", extra_args=["-cpu", "host"], allow_extra_args=True),
+                _caps(emulator=None, qemu=qemu_bin), accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            cpu_values = [spec.argv[i + 1] for i, a in enumerate(spec.argv) if a == "-cpu"]
+            self.assertEqual(cpu_values, ["host"])
+
     def test_data_drive_is_writable_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             product_dir = make_generic_x86_64_product(Path(raw), with_userdata=True)

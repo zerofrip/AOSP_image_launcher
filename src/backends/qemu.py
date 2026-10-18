@@ -614,8 +614,13 @@ class QemuBackend(Backend):
         if accel.fallback:
             warnings.append(f"accelerator fallback to {accel.selected}: {accel.reason}")
 
-        # machine / memory / cpus
+        # machine / memory / cpus / cpu model
         argv += ["-machine", "pc"]
+        # 'max' exposes the full host/TCG feature set (SSE4.2/SSSE3/AVX ...),
+        # which AOSP x86_64 init/bionic require; skipped if the user already
+        # supplies their own -cpu via --extra-arg (applied later, last-wins).
+        if not (options.allow_extra_args and "-cpu" in options.extra_args):
+            argv += ["-cpu", "max"]
         argv += ["-m", str(options.memory_mb)]
         argv += ["-smp", str(options.cpus)]
 
