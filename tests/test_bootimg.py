@@ -378,8 +378,8 @@ class CpioAndFstabTests(unittest.TestCase):
         for line in data_lines:
             self.assertIn("check", line)
             self.assertIn("formattable", line)
-            self.assertIn("noatime,nosuid,nodev,check,formattable", line)
-            self.assertIn("wait,first_stage_mount", line)
+            self.assertIn("noatime,nosuid,nodev", line)
+            self.assertIn("wait,check,formattable,first_stage_mount", line)
         # Non-data roles must remain read-only and must not pick up formattable.
         for line in fstab_text.splitlines():
             if "/data " not in line and "/dev/block/by-name/" in line:

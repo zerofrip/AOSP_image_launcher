@@ -756,7 +756,7 @@ def build_partition_map_and_fstab(
         if name == "data":
             for fstype in ("f2fs", "ext4"):
                 lines.append(
-                    f"{device} /data {fstype} noatime,nosuid,nodev,check,formattable wait,first_stage_mount"
+                    f"{device} /data {fstype} noatime,nosuid,nodev wait,check,formattable,first_stage_mount"
                 )
         elif name == "metadata":
             lines.append(
