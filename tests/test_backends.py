@@ -1261,6 +1261,33 @@ class SlotSuffixDefaultTests(unittest.TestCase):
             assert match is not None
             self.assertNotEqual(match.group(1), "0")
 
+    def test_native_path_emits_cuttlefish_vendor_apex_selections(self) -> None:
+        """The native boot path must select one provider for each of this
+        Cuttlefish build's multi-install vendor APEX groups, or apexd-bootstrap
+        SIGABRTs on the duplicate-HAL conflict and blocks all boot."""
+        expected = {
+            "androidboot.vendor.apex.com.android.hardware.gatekeeper=com.android.hardware.gatekeeper.nonsecure",
+            "androidboot.vendor.apex.com.android.hardware.graphics.composer=com.android.hardware.graphics.composer.drm_hwcomposer",
+            "androidboot.vendor.apex.com.android.hardware.keymint=com.android.hardware.keymint.rust_nonsecure",
+            "androidboot.vendor.apex.com.google.emulated.camera.provider.hal=com.google.emulated.camera.provider.hal.v4l2",
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            version = "5.10.160-android12"
+            product_dir = _make_boot_img_product_with_kernel_version(Path(raw), version)
+            product = inventory_product_out(product_dir)
+            qemu_bin = self._make_qemu_bin(raw)
+            spec = QemuBackend().plan(
+                product,
+                LaunchOptions(backend="qemu"),
+                _caps(emulator=None, qemu=qemu_bin),
+                accel=_tcg(),
+            )
+            self.assertTrue(spec.bootable, msg=f"errors={spec.errors}")
+            cmdline = spec.argv[spec.argv.index("-append") + 1]
+            cmdline_params = set(cmdline.split())
+            for entry in expected:
+                self.assertIn(entry, cmdline_params, msg=cmdline)
+
 
 class AutoBackendTests(unittest.TestCase):
     def test_auto_ranchu_uses_emulator(self) -> None:

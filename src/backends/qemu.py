@@ -584,6 +584,22 @@ class QemuBackend(Backend):
                         extra_ramdisk=extra_ramdisk,
                         lz4_path=str(capabilities.lz4.path) if capabilities.lz4.available else None,
                     )
+                    # Hand-validated Cuttlefish multi-install vendor APEX
+                    # selections: this build ships multiple vendor APEXes
+                    # providing the same HAL under different module names, and
+                    # apexd-bootstrap SIGABRTs (blocking all boot) unless one
+                    # is picked via ro.boot.vendor.apex.<module_name>. These
+                    # four pairs are specific to this known Cuttlefish
+                    # conflict set, not a generic solution for arbitrary
+                    # products (apexd resolves each via the matching
+                    # androidboot.vendor.apex.<module_name>=<filename> cmdline
+                    # parameter).
+                    cuttlefish_vendor_apex_selections = [
+                        "androidboot.vendor.apex.com.android.hardware.gatekeeper=com.android.hardware.gatekeeper.nonsecure",
+                        "androidboot.vendor.apex.com.android.hardware.graphics.composer=com.android.hardware.graphics.composer.drm_hwcomposer",
+                        "androidboot.vendor.apex.com.android.hardware.keymint=com.android.hardware.keymint.rust_nonsecure",
+                        "androidboot.vendor.apex.com.google.emulated.camera.provider.hal=com.google.emulated.camera.provider.hal.v4l2",
+                    ]
                     boot_cmdline = " ".join(
                         s for s in [
                             boot_cmdline,
@@ -596,6 +612,7 @@ class QemuBackend(Backend):
                             # non-zero vsock port or VsockServer::new() panics
                             # on bind to port 0 and crash-loops the HAL.
                             "androidboot.vsock_lights_port=12345",
+                            *cuttlefish_vendor_apex_selections,
                         ] if s.strip()
                     )
 
